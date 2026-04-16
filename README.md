@@ -4,6 +4,7 @@ A small, from-scratch RV32 soft core for the AMD SP701 (Spartan-7 XC7S100) FPGA,
 built stage by stage toward a Linux-capable SoC.
 
 Named after Chen Qianyu from *Arknights: Endfield* — "青龙角、马尾辫、两把傻不愣登的剑~ 陈千语！“ The core is pretty dumb, but it's getting there - where's there? I don't know either to be honest.
+
 ![gif of chenqianyu](docs/chenqianyu.gif)
 
 ## Status (Stage 1)
