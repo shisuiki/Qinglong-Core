@@ -2,12 +2,13 @@
 #
 # Always `source scripts/env.sh` first so Verilator and Spike are on PATH.
 
-.PHONY: help sim sim-all riscv-tests clean synth prog blinky-synth blinky-prog hello-synth hello-prog spike-check
+.PHONY: help sim sim-all sim-c riscv-tests clean synth prog blinky-synth blinky-prog hello-synth hello-prog spike-check
 
 help:
 	@echo "Targets:"
 	@echo "  make sim TEST=sw/tests/asm/pass.elf     # run one ELF under Verilator"
-	@echo "  make sim-all                            # run the full regression"
+	@echo "  make sim-all                            # run the full riscv-tests regression"
+	@echo "  make sim-c                              # run the in-tree C-test regression"
 	@echo "  make riscv-tests                        # build upstream RV32I/M/A ISA tests"
 	@echo "  make spike-check                        # sanity-check spike is on PATH"
 	@echo "  make blinky-synth                       # Vivado synth+impl of blinky"
@@ -27,6 +28,9 @@ sim: | sim/build
 
 sim-all: | sim/build
 	$(MAKE) -C sim sim-all
+
+sim-c: | sim/build
+	$(MAKE) -C sim sim-c
 
 sim/build:
 	mkdir -p sim/build

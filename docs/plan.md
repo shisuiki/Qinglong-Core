@@ -171,14 +171,17 @@ See `progress.md` for the full report.
 4. `soc_top.sv` — CLINT instantiated and decoded at `addr[31:20] == 12'h020`; `mti`/`msi` piped through the new core interrupt ports.
 5. `sw/tests/c/irq_timer.c`, `sw/tests/c/irq_swi.c` — exercise MTI and MSI end-to-end (mtvec install, mie+mstatus toggling, handler re-arms, mret, `mcause` check).
 
-Not in Stage 4 (deferred): WFI, vectored `mtvec`, MEI from an external intc, AXI shim, boot ROM.
+Not in Stage 4 (deferred): MEI from an external intc, AXI shim, boot ROM.
 
 ## Stage 4 status (closed 2026-04-16)
 
 - CLINT decodes and runs under Verilator. `mtime` increments every cycle; `mtimecmp` and `msip` writable via the dmem bus.
 - **irq_timer.c** passes in 2425 cycles (8 timer ticks at 200-cycle period, handler verifies `mcause == 0x80000007`).
 - **irq_swi.c** passes in 277 cycles (MSIP raise, handler verifies `mcause == 0x80000003`, clears MSIP).
+- **irq_wfi.c** (stretch): same timer flow but uses `wfi` in the wait body. Exercises WFI-as-NOP.
+- **irq_vectored.c** (stretch): uses `mtvec[0]=1` with a 12-entry jump table; timer fires into table entry [7] (MTI cause code).
 - Full riscv-tests regression still 70/76 — no regressions. CSR-read of `mip` now returns live pending bits instead of constant 0, with no test impact.
+- New `make sim-c` target in the top-level Makefile runs the C-test regression (hello, muldiv, irq_*). 6/6 green.
 
 ## Stage 3 status (closed 2026-04-16)
 

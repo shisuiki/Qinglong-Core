@@ -125,8 +125,9 @@ module core_multicycle #(
     wire is_ecall  = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h000);
     wire is_ebreak = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h001);
     wire is_mret   = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h302);
+    wire is_wfi    = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h105);
     wire is_csr    = is_system && (funct3 != `F3_PRIV);
-    wire is_priv_op = is_ecall | is_ebreak | is_mret;
+    wire is_priv_op = is_ecall | is_ebreak | is_mret | is_wfi;
 
     // M-extension: funct7 == 0000001 with OP.  funct3[2] splits MUL-group (0) from DIV-group (1).
     wire is_muldiv      = is_op && (funct7 == `F7_MULDIV);
@@ -310,9 +311,9 @@ module core_multicycle #(
 
         // SYSTEM / CSR decode
         if (is_system && (funct3 == `F3_PRIV)) begin
-            // Only ECALL (0x000), EBREAK (0x001), MRET (0x302).
+            // ECALL (0x000), EBREAK (0x001), MRET (0x302), WFI (0x105).
             case (instr_q[31:20])
-                12'h000, 12'h001, 12'h302: /* ok */ ;
+                12'h000, 12'h001, 12'h302, 12'h105: /* ok */ ;
                 default: illegal_opcode = 1'b1;
             endcase
             // rs1 and rd must be zero for these
@@ -586,13 +587,17 @@ module core_multicycle #(
             S_FETCH: begin
                 if (irq_pending_v) begin
                     // Take interrupt at instruction boundary. mepc = pc_q; mtval = 0.
+                    // Vectored mode (mtvec[0]==1) adds 4 * cause_code to the base
+                    // *for interrupts only*; exceptions always go to the base.
                     fetch_irq_trap = 1'b1;
                     commit_valid   = 1'b1;
                     commit_trap    = 1'b1;
                     commit_cause   = irq_cause_v;
                     commit_pc      = pc_q;
                     commit_insn    = 32'h0;
-                    pc_d           = {mtvec_v[31:2], 2'b00};
+                    pc_d           = mtvec_v[0]
+                                   ? ({mtvec_v[31:2], 2'b00} + {26'd0, irq_cause_v[3:0], 2'b00})
+                                   : {mtvec_v[31:2], 2'b00};
                     state_d        = S_FETCH;
                 end else begin
                     ifetch_req_valid = 1'b1;

@@ -15,11 +15,15 @@ Chronological log of what's been done and what's next. Newest entries at the top
 - **`sw/tests/c/irq_swi.c`** — sets CLINT `msip=1`, enables MSIE+MIE; handler verifies `mcause == 0x80000003`, clears `msip`, returns; main loop PASSes on first handler entry. Runs in **277 cycles**.
 - **Full riscv-tests regression:** 70 / 76 — unchanged from Stage 3. The `mip` read-value change (was hard 0) had no effect on any existing test because they either don't touch `mip` or accept any value for it.
 
+### Stretch additions (same day)
+- **`wfi` decoded as architectural NOP.** System-PRIV accepts `12'h105` in addition to ECALL/EBREAK/MRET; commit falls through the standard single-cycle path with PC+4 and no writeback. The next S_FETCH is where interrupts land, so `wfi` is correct-by-construction in a loop `while (!done) { wfi; }`.
+- **`mtvec` vectored mode supported.** When `mtvec[0]=1`, interrupt targets are `base + 4*cause_code` — exceptions still go to base. The `irq_cause_v[3:0]` field covers MSI=3 / MTI=7 / MEI=11.
+- **C regression harness.** New `make sim-c` target runs every ELF in `sw/tests/c/`, passing if the MMIO-exit-0 line appears in the log. Currently 6/6 green: `hello`, `muldiv`, `irq_timer`, `irq_swi`, `irq_wfi`, `irq_vectored`.
+
 ### Caveats
-- `mtvec` vectored mode (`mode[1:0]=01`) not implemented — all traps and interrupts use direct mode. Most M-mode code uses direct anyway.
-- `wfi` still decodes as illegal-opcode. Could legally be a NOP in this implementation; deferred until a test actually wants to sleep.
 - No AXI shim; CLINT is on the native ready/valid fabric. Plan is to wrap the dmem bus as AXI-Lite only when MMU work starts and we also want AXI peripherals (UartLite, IntC).
 - Single-hart CLINT. `mhartid` is hard 0 and the CLINT has exactly one msip / one mtimecmp.
+- WFI is a no-op architectural hint in this impl — the core doesn't actually idle clock gating. Spec-compliant; room to add power optimisations later if the pipeline grows.
 
 ## 2026-04-16 — Stage 3: A-extension green
 

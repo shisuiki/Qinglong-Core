@@ -75,5 +75,11 @@ sim: run
 sim-all: build
 	@bash $(SIM_DIR)/scripts/regress.sh $(BIN)
 
+# Regression over the in-tree C tests.  Requires `make -C sw/tests/c` first to
+# produce the ELFs.  Each test must print "PASS\n" and mmio_exit(0).
+sim-c: build
+	@$(MAKE) -C $(REPO)/sw/tests/c all >/dev/null
+	@bash $(SIM_DIR)/scripts/regress_c.sh $(BIN)
+
 clean:
 	rm -rf $(OBJ_DIR) $(BUILD_DIR)/*.log $(BUILD_DIR)/*.trace $(BUILD_DIR)/*.vcd
