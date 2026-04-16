@@ -155,7 +155,20 @@ See `progress.md` for the full report.
 
 ## Stage 3 deliverables (A-extension)
 
-Still scoped as originally planned (LR/SC + AMO opcodes, A-ext regression). Board UART capture is a prerequisite to taking real console interaction off the critical path, but not a blocker for Stage 3.
+1. Decode AMO opcode (`0101111`) + funct3 `010` + funct5 for LR.W, SC.W, AMO{SWAP,ADD,XOR,AND,OR,MIN,MAX,MINU,MAXU}.W. `aq`/`rl` bits are no-ops on this single-hart core.
+2. LR.W: word load + arm per-hart reservation (word-aligned addr).
+3. SC.W: commit rd=1 immediately on reservation miss; on hit, store rs2 and commit rd=0 after memory ack. Always clear reservation.
+4. AMO RMW: two-phase memory op. `S_EXEC → S_MEM` (latch old value into `amo_old_q`) `→ S_AMO_STORE → S_AMO_WAIT` (writeback original loaded value to rd).
+5. Misalignment traps: LR/AMO-load → `CAUSE_LOAD_ADDR_MISALIGNED`; SC/AMO-store → `CAUSE_STORE_ADDR_MISALIGNED`.
+6. Reservation cleared on any trap.
+7. `rv32ua-p-*` regression: 10/10 under Verilator.
+
+## Stage 3 status (closed 2026-04-16)
+
+- All 10 rv32ua tests pass (9 AMO variants + lrsc).
+- Full ISA regression now 70/76 (rv32ui + rv32mi + rv32um + rv32ua). Same 6 out-of-scope Stage-1 failures; no regressions.
+- `sim/scripts/regress.sh` default `FAMILIES` now includes `rv32um rv32ua`.
+- Board UART capture remains deferred (Stage 5/6 AXI UartLite).
 
 ## Open questions
 

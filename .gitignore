@@ -20,6 +20,7 @@ sw/tests/c/*.dump
 sw/tests/asm/*.o
 sw/tests/c/*.o
 sw/tests/c/*.mem
+fpga/**/*.mem
 
 # Vendored upstream riscv-tests — cloned separately, see sw/riscv-tests.md
 # and the "one-time setup" section in README.md.

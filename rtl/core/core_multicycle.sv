@@ -59,11 +59,13 @@ module core_multicycle #(
     // =========================================================================
     // State
     // =========================================================================
-    typedef enum logic [1:0] {
-        S_FETCH = 2'd0,
-        S_EXEC  = 2'd1,
-        S_MEM   = 2'd2,
-        S_DIV   = 2'd3
+    typedef enum logic [2:0] {
+        S_FETCH      = 3'd0,
+        S_EXEC       = 3'd1,
+        S_MEM        = 3'd2,
+        S_DIV        = 3'd3,
+        S_AMO_STORE  = 3'd4,
+        S_AMO_WAIT   = 3'd5
     } state_t;
     state_t state_q;
 
@@ -75,6 +77,12 @@ module core_multicycle #(
     logic [31:0] pc_of_mem_q;
     logic [31:0] instr_of_mem_q;
     logic        is_load_q;
+    logic        is_lr_q;
+    logic        is_sc_q;
+    logic        is_rmw_q;
+    logic [31:0] amo_old_q;
+    logic        resv_valid_q;
+    logic [29:0] resv_addr_q;   // word-aligned reservation (bits [31:2] of the address)
 
     // =========================================================================
     // Decode helpers
@@ -97,6 +105,17 @@ module core_multicycle #(
     wire is_op     = (opcode == `OP_OP);
     wire is_misc   = (opcode == `OP_MISC_MEM);
     wire is_system = (opcode == `OP_SYSTEM);
+    wire is_amo    = (opcode == `OP_AMO) && (funct3 == `F3_AMO_W);
+
+    wire [4:0] amo_funct5 = instr_q[31:27];
+    wire is_lr     = is_amo && (amo_funct5 == `AMO_LR) && (rs2_i == 5'd0);
+    wire is_sc     = is_amo && (amo_funct5 == `AMO_SC);
+    wire is_amo_rmw = is_amo && !is_lr && !is_sc &&
+                      ((amo_funct5 == `AMO_SWAP) || (amo_funct5 == `AMO_ADD)  ||
+                       (amo_funct5 == `AMO_XOR)  || (amo_funct5 == `AMO_AND)  ||
+                       (amo_funct5 == `AMO_OR)   || (amo_funct5 == `AMO_MIN)  ||
+                       (amo_funct5 == `AMO_MAX)  || (amo_funct5 == `AMO_MINU) ||
+                       (amo_funct5 == `AMO_MAXU));
 
     wire is_ecall  = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h000);
     wire is_ebreak = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h001);
@@ -200,6 +219,7 @@ module core_multicycle #(
             is_jalr:   begin alu_a = pc_q;     alu_b = 32'd4; alu_op = 4'd0;  end
             is_load:   begin alu_a = rs1_data; alu_b = imm_i; alu_op = 4'd0;  end
             is_store:  begin alu_a = rs1_data; alu_b = imm_s; alu_op = 4'd0;  end
+            is_amo:    begin alu_a = rs1_data; alu_b = 32'd0; alu_op = 4'd0;  end
             is_branch: begin alu_a = rs1_data; alu_b = rs2_data; alu_op = 4'd1; end
             is_op_imm: begin
                 alu_a = rs1_data; alu_b = imm_i;
@@ -240,11 +260,17 @@ module core_multicycle #(
         unique case (opcode)
             `OP_LUI, `OP_AUIPC, `OP_JAL, `OP_JALR,
             `OP_BRANCH, `OP_LOAD, `OP_STORE,
-            `OP_OP_IMM, `OP_OP, `OP_MISC_MEM, `OP_SYSTEM:
+            `OP_OP_IMM, `OP_OP, `OP_MISC_MEM, `OP_SYSTEM, `OP_AMO:
                 illegal_opcode = 1'b0;
             default:
                 illegal_opcode = 1'b1;
         endcase
+
+        // AMO must be funct3 = 010 with a recognized funct5; LR.W requires rs2 == 0.
+        if (opcode == `OP_AMO) begin
+            if (funct3 != `F3_AMO_W) illegal_opcode = 1'b1;
+            else if (!(is_lr || is_sc || is_amo_rmw)) illegal_opcode = 1'b1;
+        end
 
         // OP-IMM shift funct7 / shamt checks
         if (is_op_imm && (funct3 == `F3_SLL)) begin
@@ -319,6 +345,7 @@ module core_multicycle #(
     end
 
     logic ls_misaligned;
+    logic amo_misaligned;
     always_comb begin
         ls_misaligned = 1'b0;
         unique case (funct3)
@@ -326,6 +353,7 @@ module core_multicycle #(
             `F3_LW, `F3_SW:          ls_misaligned = (mem_addr[1:0] != 2'b00);
             default:                 ls_misaligned = 1'b0;
         endcase
+        amo_misaligned = is_amo && (mem_addr[1:0] != 2'b00);
     end
 
     // =========================================================================
@@ -389,6 +417,31 @@ module core_multicycle #(
     end
 
     // =========================================================================
+    // A-extension helpers
+    // =========================================================================
+    // SC hit: reservation valid AND the word-aligned address matches.
+    wire sc_hit = resv_valid_q && (resv_addr_q == mem_addr[31:2]);
+
+    // AMO RMW result: combines old memory value (latched in amo_old_q) with rs2_data
+    // using the funct5 of the in-flight AMO (still in instr_q).
+    wire [4:0] amo_funct5_live = instr_q[31:27];
+    logic [31:0] amo_result;
+    always_comb begin
+        unique case (amo_funct5_live)
+            `AMO_SWAP: amo_result = rs2_data;
+            `AMO_ADD:  amo_result = amo_old_q + rs2_data;
+            `AMO_XOR:  amo_result = amo_old_q ^ rs2_data;
+            `AMO_AND:  amo_result = amo_old_q & rs2_data;
+            `AMO_OR:   amo_result = amo_old_q | rs2_data;
+            `AMO_MIN:  amo_result = ($signed(amo_old_q) < $signed(rs2_data)) ? amo_old_q : rs2_data;
+            `AMO_MAX:  amo_result = ($signed(amo_old_q) < $signed(rs2_data)) ? rs2_data : amo_old_q;
+            `AMO_MINU: amo_result = (amo_old_q < rs2_data) ? amo_old_q : rs2_data;
+            `AMO_MAXU: amo_result = (amo_old_q < rs2_data) ? rs2_data : amo_old_q;
+            default:   amo_result = 32'd0;
+        endcase
+    end
+
+    // =========================================================================
     // Arithmetic writeback value (valid for non-load commits at S_EXEC)
     // =========================================================================
     logic [31:0] arith_wb;
@@ -430,17 +483,25 @@ module core_multicycle #(
             exec_trap  = 1'b1;
             exec_cause = `CAUSE_STORE_ADDR_MISALIGNED;
             exec_tval  = mem_addr;
+        end else if (is_lr && amo_misaligned) begin
+            exec_trap  = 1'b1;
+            exec_cause = `CAUSE_LOAD_ADDR_MISALIGNED;
+            exec_tval  = mem_addr;
+        end else if ((is_sc || is_amo_rmw) && amo_misaligned) begin
+            exec_trap  = 1'b1;
+            exec_cause = `CAUSE_STORE_ADDR_MISALIGNED;
+            exec_tval  = mem_addr;
         end
     end
 
     // Fetch / MEM faults are combinationally derived below in the state machine.
     // `trap_take` wires into csr.sv.
     assign trap_take     = commit_trap;
-    assign trap_pc_in    = (state_q == S_MEM) ? pc_of_mem_q : pc_q;
+    assign trap_pc_in    = (state_q == S_MEM || state_q == S_AMO_WAIT) ? pc_of_mem_q : pc_q;
     assign trap_cause_in = commit_cause;
-    assign trap_tval_in  = (state_q == S_EXEC) ? exec_tval
-                         : (state_q == S_MEM)  ? mem_addr_q
-                         :                       pc_q;
+    assign trap_tval_in  = (state_q == S_EXEC)                         ? exec_tval
+                         : (state_q == S_MEM || state_q == S_AMO_WAIT) ? mem_addr_q
+                         :                                               pc_q;
     assign do_mret       = (state_q == S_EXEC) && is_mret && !exec_trap;
 
     // =========================================================================
@@ -453,6 +514,10 @@ module core_multicycle #(
     logic [4:0]  rd_d;
     logic [31:0] pc_of_mem_d, instr_of_mem_d;
     logic        is_load_d;
+    logic        is_lr_d, is_sc_d, is_rmw_d;
+    logic [31:0] amo_old_d;
+    logic        resv_valid_d;
+    logic [29:0] resv_addr_d;
 
     always_comb begin
         // --- defaults (hold) ---
@@ -465,6 +530,12 @@ module core_multicycle #(
         pc_of_mem_d     = pc_of_mem_q;
         instr_of_mem_d  = instr_of_mem_q;
         is_load_d       = is_load_q;
+        is_lr_d         = is_lr_q;
+        is_sc_d         = is_sc_q;
+        is_rmw_d        = is_rmw_q;
+        amo_old_d       = amo_old_q;
+        resv_valid_d    = resv_valid_q;
+        resv_addr_d     = resv_addr_q;
 
         ifetch_req_valid = 1'b0;
         ifetch_req_addr  = pc_q;
@@ -522,13 +593,14 @@ module core_multicycle #(
                 csr_en = is_csr && !exec_trap;
 
                 if (exec_trap) begin
-                    // Trap: no writeback, jump to mtvec base.
+                    // Trap: no writeback, jump to mtvec base. Traps clear any reservation.
                     commit_valid = 1'b1;
                     commit_trap  = 1'b1;
                     commit_cause = exec_cause;
                     commit_pc    = pc_q;
                     commit_insn  = instr_q;
                     pc_d         = {mtvec_v[31:2], 2'b00};
+                    resv_valid_d = 1'b0;
                     state_d      = S_FETCH;
                 end else if (is_mret) begin
                     commit_valid = 1'b1;
@@ -553,6 +625,87 @@ module core_multicycle #(
                         pc_of_mem_d    = pc_q;
                         instr_of_mem_d = instr_q;
                         is_load_d      = is_load;
+                        is_lr_d        = 1'b0;
+                        is_sc_d        = 1'b0;
+                        is_rmw_d       = 1'b0;
+                        state_d        = S_MEM;
+                    end
+                end else if (is_lr) begin
+                    // Load-Reserved: issue word load; reservation is armed on response.
+                    dmem_req_valid = 1'b1;
+                    dmem_req_addr  = {mem_addr[31:2], 2'b00};
+                    dmem_req_wen   = 1'b0;
+                    dmem_req_wmask = 4'b1111;
+                    dmem_req_size  = 2'b10;
+                    if (dmem_req_ready) begin
+                        mem_addr_d     = mem_addr;
+                        funct3_d       = `F3_LW;
+                        rd_d           = rd_i;
+                        pc_of_mem_d    = pc_q;
+                        instr_of_mem_d = instr_q;
+                        is_load_d      = 1'b1;
+                        is_lr_d        = 1'b1;
+                        is_sc_d        = 1'b0;
+                        is_rmw_d       = 1'b0;
+                        state_d        = S_MEM;
+                    end
+                end else if (is_sc) begin
+                    // Store-Conditional: if reservation matches, issue the store and
+                    // commit rd=0 on response. Otherwise skip the store and commit rd=1
+                    // this cycle. Either way the reservation is cleared.
+                    if (sc_hit) begin
+                        dmem_req_valid = 1'b1;
+                        dmem_req_addr  = {mem_addr[31:2], 2'b00};
+                        dmem_req_wen   = 1'b1;
+                        dmem_req_wdata = rs2_data;
+                        dmem_req_wmask = 4'b1111;
+                        dmem_req_size  = 2'b10;
+                        if (dmem_req_ready) begin
+                            mem_addr_d     = mem_addr;
+                            funct3_d       = `F3_SW;
+                            rd_d           = rd_i;
+                            pc_of_mem_d    = pc_q;
+                            instr_of_mem_d = instr_q;
+                            is_load_d      = 1'b0;
+                            is_lr_d        = 1'b0;
+                            is_sc_d        = 1'b1;
+                            is_rmw_d       = 1'b0;
+                            resv_valid_d   = 1'b0;
+                            state_d        = S_MEM;
+                        end
+                    end else begin
+                        // SC failure: write a non-zero code to rd and fall through.
+                        rf_wen         = (rd_i != 5'd0);
+                        rf_rd          = rd_i;
+                        rf_wd          = 32'd1;
+                        commit_valid   = 1'b1;
+                        commit_pc      = pc_q;
+                        commit_insn    = instr_q;
+                        commit_rd_wen  = (rd_i != 5'd0);
+                        commit_rd_addr = rd_i;
+                        commit_rd_data = 32'd1;
+                        pc_d           = pc_q + 32'd4;
+                        resv_valid_d   = 1'b0;
+                        state_d        = S_FETCH;
+                    end
+                end else if (is_amo_rmw) begin
+                    // AMO RMW: issue the load half; S_MEM latches amo_old_q, then S_AMO_STORE
+                    // issues the store of op(amo_old_q, rs2).
+                    dmem_req_valid = 1'b1;
+                    dmem_req_addr  = {mem_addr[31:2], 2'b00};
+                    dmem_req_wen   = 1'b0;
+                    dmem_req_wmask = 4'b1111;
+                    dmem_req_size  = 2'b10;
+                    if (dmem_req_ready) begin
+                        mem_addr_d     = mem_addr;
+                        funct3_d       = `F3_LW;
+                        rd_d           = rd_i;
+                        pc_of_mem_d    = pc_q;
+                        instr_of_mem_d = instr_q;
+                        is_load_d      = 1'b1;
+                        is_lr_d        = 1'b0;
+                        is_sc_d        = 1'b0;
+                        is_rmw_d       = 1'b1;
                         state_d        = S_MEM;
                     end
                 end else if (is_div_variant) begin
@@ -594,28 +747,104 @@ module core_multicycle #(
                     if (dmem_rsp_fault) begin
                         commit_valid = 1'b1;
                         commit_trap  = 1'b1;
-                        commit_cause = is_load_q ? `CAUSE_LOAD_ACCESS_FAULT : `CAUSE_STORE_ACCESS_FAULT;
+                        commit_cause = (is_sc_q || is_rmw_q) ? `CAUSE_STORE_ACCESS_FAULT
+                                                             : (is_load_q ? `CAUSE_LOAD_ACCESS_FAULT
+                                                                          : `CAUSE_STORE_ACCESS_FAULT);
                         commit_pc    = pc_of_mem_q;
                         commit_insn  = instr_of_mem_q;
                         pc_d         = {mtvec_v[31:2], 2'b00};
+                        resv_valid_d = 1'b0;
+                        is_lr_d      = 1'b0;
+                        is_sc_d      = 1'b0;
+                        is_rmw_d     = 1'b0;
                         state_d      = S_FETCH;
+                    end else if (is_rmw_q) begin
+                        // AMO RMW load phase complete: latch old value, go drive the store.
+                        amo_old_d = dmem_rsp_rdata;
+                        state_d   = S_AMO_STORE;
                     end else begin
                         logic wb_en_mem;
-                        wb_en_mem = is_load_q && (rd_q != 5'd0);
+                        logic [31:0] wb_data_mem;
+                        if (is_sc_q) begin
+                            wb_en_mem   = (rd_q != 5'd0);
+                            wb_data_mem = 32'd0;       // SC success writes 0 to rd
+                        end else begin
+                            wb_en_mem   = is_load_q && (rd_q != 5'd0);
+                            wb_data_mem = load_result; // LR falls into this path (is_load_q=1)
+                        end
 
                         rf_wen = wb_en_mem;
                         rf_rd  = rd_q;
-                        rf_wd  = load_result;
+                        rf_wd  = wb_data_mem;
 
                         commit_valid   = 1'b1;
                         commit_pc      = pc_of_mem_q;
                         commit_insn    = instr_of_mem_q;
                         commit_rd_wen  = wb_en_mem;
                         commit_rd_addr = rd_q;
-                        commit_rd_data = load_result;
+                        commit_rd_data = wb_data_mem;
 
+                        // LR.W arms the reservation (word-aligned).
+                        if (is_lr_q) begin
+                            resv_valid_d = 1'b1;
+                            resv_addr_d  = mem_addr_q[31:2];
+                        end
+
+                        is_lr_d = 1'b0;
+                        is_sc_d = 1'b0;
                         pc_d    = pc_of_mem_q + 32'd4;
                         state_d = S_FETCH;
+                    end
+                end
+            end
+
+            // -------------------------------------------------------------
+            S_AMO_STORE: begin
+                // Drive the store half of the AMO using amo_result (amo_old_q op rs2).
+                dmem_req_valid = 1'b1;
+                dmem_req_addr  = {mem_addr_q[31:2], 2'b00};
+                dmem_req_wen   = 1'b1;
+                dmem_req_wdata = amo_result;
+                dmem_req_wmask = 4'b1111;
+                dmem_req_size  = 2'b10;
+                if (dmem_req_ready) begin
+                    state_d = S_AMO_WAIT;
+                end
+            end
+
+            // -------------------------------------------------------------
+            S_AMO_WAIT: begin
+                if (dmem_rsp_valid) begin
+                    if (dmem_rsp_fault) begin
+                        commit_valid = 1'b1;
+                        commit_trap  = 1'b1;
+                        commit_cause = `CAUSE_STORE_ACCESS_FAULT;
+                        commit_pc    = pc_of_mem_q;
+                        commit_insn  = instr_of_mem_q;
+                        pc_d         = {mtvec_v[31:2], 2'b00};
+                        resv_valid_d = 1'b0;
+                        is_rmw_d     = 1'b0;
+                        state_d      = S_FETCH;
+                    end else begin
+                        // AMO commits the *original* loaded value to rd.
+                        logic wb_en_amo;
+                        wb_en_amo = (rd_q != 5'd0);
+
+                        rf_wen = wb_en_amo;
+                        rf_rd  = rd_q;
+                        rf_wd  = amo_old_q;
+
+                        commit_valid   = 1'b1;
+                        commit_pc      = pc_of_mem_q;
+                        commit_insn    = instr_of_mem_q;
+                        commit_rd_wen  = wb_en_amo;
+                        commit_rd_addr = rd_q;
+                        commit_rd_data = amo_old_q;
+
+                        resv_valid_d = 1'b0;    // AMO invalidates any outstanding reservation
+                        is_rmw_d     = 1'b0;
+                        pc_d         = pc_of_mem_q + 32'd4;
+                        state_d      = S_FETCH;
                     end
                 end
             end
@@ -661,6 +890,12 @@ module core_multicycle #(
             pc_of_mem_q    <= 32'd0;
             instr_of_mem_q <= 32'h0000_0013;
             is_load_q      <= 1'b0;
+            is_lr_q        <= 1'b0;
+            is_sc_q        <= 1'b0;
+            is_rmw_q       <= 1'b0;
+            amo_old_q      <= 32'd0;
+            resv_valid_q   <= 1'b0;
+            resv_addr_q    <= 30'd0;
         end else begin
             state_q        <= state_d;
             pc_q           <= pc_d;
@@ -671,6 +906,12 @@ module core_multicycle #(
             pc_of_mem_q    <= pc_of_mem_d;
             instr_of_mem_q <= instr_of_mem_d;
             is_load_q      <= is_load_d;
+            is_lr_q        <= is_lr_d;
+            is_sc_q        <= is_sc_d;
+            is_rmw_q       <= is_rmw_d;
+            amo_old_q      <= amo_old_d;
+            resv_valid_q   <= resv_valid_d;
+            resv_addr_q    <= resv_addr_d;
         end
     end
 

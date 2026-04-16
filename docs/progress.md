@@ -2,6 +2,32 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-16 — Stage 3: A-extension green
+
+### What shipped
+- **Decode.** `defs.svh` gains `OP_AMO (0101111)`, `F3_AMO_W`, and the eleven A-extension funct5 constants (`AMO_LR/SC/SWAP/ADD/XOR/OR/AND/MIN/MAX/MINU/MAXU`). `aq`/`rl` bits are accepted and ignored — this is a single-hart in-order core, so they're architectural no-ops.
+- **Core integration** (`core_multicycle.sv`):
+  - State enum widens to 3 bits, adds `S_AMO_STORE` and `S_AMO_WAIT`.
+  - New latched regs: `is_lr_q`, `is_sc_q`, `is_rmw_q`, `amo_old_q`, `resv_valid_q`, `resv_addr_q[29:0]` (word-granular reservation).
+  - LR.W path: issues a word load in `S_EXEC`, writes back `load_result` in `S_MEM` and arms the reservation there.
+  - SC.W path: `sc_hit = resv_valid_q && resv_addr_q == mem_addr[31:2]`. On miss, commits rd=1 in `S_EXEC` (no bus traffic). On hit, issues the store and commits rd=0 in `S_MEM` after ack. Either way clears the reservation.
+  - AMO RMW path: `S_EXEC` issues load → `S_MEM` latches `amo_old_q <= dmem_rsp_rdata` and advances to `S_AMO_STORE` → `S_AMO_STORE` drives the store with `amo_result = op(amo_old_q, rs2_data)` → `S_AMO_WAIT` commits the *original* loaded value to rd when the store rsp arrives, and clears the reservation.
+  - Reservation is also cleared on any trap (fetch-fault, illegal, misalign, ECALL, EBREAK, load/store/AMO access-fault).
+  - Misalignment traps: LR-misaligned → `CAUSE_LOAD_ADDR_MISALIGNED`; SC/AMO-misaligned → `CAUSE_STORE_ADDR_MISALIGNED`; `tval = mem_addr`.
+  - Illegal-opcode extended to accept OP_AMO iff funct3=010 and funct5 ∈ {known set}; LR.W requires rs2 == 0.
+  - `trap_pc_in` / `trap_tval_in` now also route from the `S_AMO_WAIT` state.
+- **ALU driver.** Added `is_amo: alu_a=rs1, alu_b=0, alu_op=ADD` so `mem_addr = rs1` — AMOs carry no immediate offset.
+
+### Tests
+- **rv32ua regression: 10 / 10.** `amoadd_w`, `amoand_w`, `amomax_w`, `amomaxu_w`, `amomin_w`, `amominu_w`, `amoor_w`, `amoswap_w`, `amoxor_w`, `lrsc` — all PASS under Verilator. `lrsc` is the slowest at 20914 cycles (exercises reservation corners in a long loop); the AMO tests finish in 330–380 cycles each.
+- **Full regression: 70 / 76.** Same six pre-existing out-of-scope Stage-1 failures (`ma_data`, `breakpoint`, `illegal`, `instret_overflow`, `pmpaddr`, `zicntr`). No regressions in rv32ui / rv32mi / rv32um.
+- **`sim/scripts/regress.sh`** default `FAMILIES` widened to `rv32ui rv32mi rv32um rv32ua` so `make sim-all` now covers the full ISA set we implement.
+
+### Caveats
+- Single-hart implementation, so `aq`/`rl` ordering bits have no observable effect. When we add a second hart or cache coherence, reservation invalidation logic will need to extend beyond the single-hart model used here (e.g. snoop-driven clears).
+- AMO RMW is 4 bus cycles in the best case: `S_EXEC` (load issue) → `S_MEM` (load rsp) → `S_AMO_STORE` (store issue) → `S_AMO_WAIT` (store rsp). Plenty of room to pipeline later if it becomes a bottleneck.
+- Board UART capture is still unverified on silicon (deferred to Stage 5/6 AXI UartLite integration).
+
 ## 2026-04-16 — Stage 2.5: first real-CPU bringup on Urbana silicon
 
 ### What shipped

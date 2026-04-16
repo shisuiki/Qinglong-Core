@@ -14,6 +14,7 @@
 `define OP_STORE    7'b0100011
 `define OP_OP_IMM   7'b0010011
 `define OP_OP       7'b0110011
+`define OP_AMO      7'b0101111  // A-extension atomics
 `define OP_MISC_MEM 7'b0001111  // FENCE
 `define OP_SYSTEM   7'b1110011  // ECALL/EBREAK/CSR*/MRET
 
@@ -46,6 +47,20 @@
 `define F3_SB       3'b000
 `define F3_SH       3'b001
 `define F3_SW       3'b010
+
+// ---------- A extension: funct3 = 010 with OP_AMO, funct5 = instr[31:27] ----------
+`define F3_AMO_W    3'b010
+`define AMO_ADD     5'b00000
+`define AMO_SWAP    5'b00001
+`define AMO_LR      5'b00010
+`define AMO_SC      5'b00011
+`define AMO_XOR     5'b00100
+`define AMO_OR      5'b01000
+`define AMO_AND     5'b01100
+`define AMO_MIN     5'b10000
+`define AMO_MAX     5'b10100
+`define AMO_MINU    5'b11000
+`define AMO_MAXU    5'b11100
 
 // ---------- M extension (funct7 = 0000001 with OP) ----------
 `define F7_MULDIV   7'b0000001
