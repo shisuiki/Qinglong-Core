@@ -45,6 +45,11 @@ module core_multicycle #(
     input  logic        dmem_rsp_fault,
     output logic        dmem_rsp_ready,
 
+    // ---- external interrupt lines (M-mode) ----
+    input  logic        ext_mti,
+    input  logic        ext_msi,
+    input  logic        ext_mei,
+
     // ---- commit trace ----
     output logic        commit_valid,
     output logic [31:0] commit_pc,
@@ -158,6 +163,8 @@ module core_multicycle #(
     logic        do_mret;
     logic [31:0] mtvec_v, mepc_v;
     logic        mstatus_mie_v;
+    logic        irq_pending_v;
+    logic [31:0] irq_cause_v;
     csr u_csr (
         .clk(clk), .rst(rst),
         .csr_en(csr_en), .csr_op(funct3), .csr_addr(instr_q[31:20]),
@@ -168,7 +175,9 @@ module core_multicycle #(
         .trap_cause(trap_cause_in), .trap_tval(trap_tval_in),
         .mret(do_mret),
         .retire(commit_valid && !commit_trap),
-        .mtvec(mtvec_v), .mepc_out(mepc_v), .mstatus_mie(mstatus_mie_v)
+        .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
+        .mtvec(mtvec_v), .mepc_out(mepc_v), .mstatus_mie(mstatus_mie_v),
+        .irq_pending(irq_pending_v), .irq_cause(irq_cause_v)
     );
 
     // M-extension: combinational multiplier (1 EX cycle) + iterative divider (32 cycles).
@@ -495,12 +504,17 @@ module core_multicycle #(
     end
 
     // Fetch / MEM faults are combinationally derived below in the state machine.
-    // `trap_take` wires into csr.sv.
+    // `trap_take` wires into csr.sv.  For interrupts taken at the S_FETCH
+    // boundary, mtval is architecturally 0; for fetch-access faults it's the
+    // faulting PC (we route pc_q in both cases, but override to 0 when the
+    // S_FETCH trap is an interrupt — signalled by `fetch_irq_trap` below).
+    logic fetch_irq_trap;
     assign trap_take     = commit_trap;
     assign trap_pc_in    = (state_q == S_MEM || state_q == S_AMO_WAIT) ? pc_of_mem_q : pc_q;
     assign trap_cause_in = commit_cause;
     assign trap_tval_in  = (state_q == S_EXEC)                         ? exec_tval
                          : (state_q == S_MEM || state_q == S_AMO_WAIT) ? mem_addr_q
+                         : (state_q == S_FETCH && fetch_irq_trap)      ? 32'd0
                          :                                               pc_q;
     assign do_mret       = (state_q == S_EXEC) && is_mret && !exec_trap;
 
@@ -553,8 +567,9 @@ module core_multicycle #(
         rf_rd  = 5'd0;
         rf_wd  = 32'd0;
 
-        csr_en    = 1'b0;
-        div_start = 1'b0;
+        csr_en         = 1'b0;
+        div_start      = 1'b0;
+        fetch_irq_trap = 1'b0;
 
         commit_valid   = 1'b0;
         commit_pc      = pc_q;
@@ -569,21 +584,33 @@ module core_multicycle #(
 
             // -------------------------------------------------------------
             S_FETCH: begin
-                ifetch_req_valid = 1'b1;
-                ifetch_req_addr  = pc_q;
-                if (ifetch_rsp_valid) begin
-                    if (ifetch_rsp_fault) begin
-                        // Fetch-fault trap: commit trap, redirect to mtvec.
-                        commit_valid = 1'b1;
-                        commit_trap  = 1'b1;
-                        commit_cause = `CAUSE_INSN_ACCESS_FAULT;
-                        commit_pc    = pc_q;
-                        commit_insn  = 32'h0;
-                        pc_d         = {mtvec_v[31:2], 2'b00};
-                        state_d      = S_FETCH;
-                    end else begin
-                        instr_d = ifetch_rsp_data;
-                        state_d = S_EXEC;
+                if (irq_pending_v) begin
+                    // Take interrupt at instruction boundary. mepc = pc_q; mtval = 0.
+                    fetch_irq_trap = 1'b1;
+                    commit_valid   = 1'b1;
+                    commit_trap    = 1'b1;
+                    commit_cause   = irq_cause_v;
+                    commit_pc      = pc_q;
+                    commit_insn    = 32'h0;
+                    pc_d           = {mtvec_v[31:2], 2'b00};
+                    state_d        = S_FETCH;
+                end else begin
+                    ifetch_req_valid = 1'b1;
+                    ifetch_req_addr  = pc_q;
+                    if (ifetch_rsp_valid) begin
+                        if (ifetch_rsp_fault) begin
+                            // Fetch-fault trap: commit trap, redirect to mtvec.
+                            commit_valid = 1'b1;
+                            commit_trap  = 1'b1;
+                            commit_cause = `CAUSE_INSN_ACCESS_FAULT;
+                            commit_pc    = pc_q;
+                            commit_insn  = 32'h0;
+                            pc_d         = {mtvec_v[31:2], 2'b00};
+                            state_d      = S_FETCH;
+                        end else begin
+                            instr_d = ifetch_rsp_data;
+                            state_d = S_EXEC;
+                        end
                     end
                 end
             end

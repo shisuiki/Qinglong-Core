@@ -2,6 +2,25 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-16 — Stage 4: native CLINT + interrupt delivery
+
+### What shipped
+- **CLINT** (`rtl/soc/clint.sv`) — SiFive-style memory-mapped interruptor at `0x0200_0000`. 64-bit `mtime` incremented every cycle (writable so software can set the clock), 64-bit `mtimecmp`, 1-bit `msip`. Outputs `mti = (mtime >= mtimecmp)` and `msi = msip[0]`. Matches the rest of the dmem fabric: combinational `req_ready=1`, 1-cycle `rsp_valid`, byte-maskable writes.
+- **`csr.sv` interrupt surface** — new inputs `ext_mti/ext_msi/ext_mei`, composed into `mip_live` (MSIP=bit3, MTIP=bit7, MEIP=bit11). CSR-read of `mip` now returns these live bits (was constant 0). `irq_pending = mstatus.MIE && (mip_live & mie_q)`, with `irq_cause` priority-encoded MEI > MSI > MTI.
+- **Core trap boundary** (`core_multicycle.sv`) — interrupt check at the top of `S_FETCH`: if `irq_pending`, commit a trap with `mepc = pc_q`, `mcause = irq_cause`, `mtval = 0`, then jump to `{mtvec[31:2], 2'b00}`. The existing `trap_take`/`trap_pc_in`/`trap_cause_in`/`trap_tval_in` plumbing carries this naturally; added a `fetch_irq_trap` flag so `mtval` is architecturally 0 for interrupts while fetch-access faults still use `pc_q`.
+- **SoC decode** (`soc_top.sv`) — CLINT occupies `addr[31:20] == 12'h020` (1 MiB window). Adds `clint_mti/clint_msi` wires and plugs them into the new `ext_mti/ext_msi` core ports. `ext_mei` tied 0 — no external-interrupt controller yet.
+
+### Tests
+- **`sw/tests/c/irq_timer.c`** — arms `mtimecmp` for a 200-cycle tick, enables MTIE+MIE, spins; handler verifies `mcause == 0x80000007`, re-arms the comparator for the next tick, `mret`s; main loop waits for 8 ticks then emits PASS. Runs in **2425 cycles**.
+- **`sw/tests/c/irq_swi.c`** — sets CLINT `msip=1`, enables MSIE+MIE; handler verifies `mcause == 0x80000003`, clears `msip`, returns; main loop PASSes on first handler entry. Runs in **277 cycles**.
+- **Full riscv-tests regression:** 70 / 76 — unchanged from Stage 3. The `mip` read-value change (was hard 0) had no effect on any existing test because they either don't touch `mip` or accept any value for it.
+
+### Caveats
+- `mtvec` vectored mode (`mode[1:0]=01`) not implemented — all traps and interrupts use direct mode. Most M-mode code uses direct anyway.
+- `wfi` still decodes as illegal-opcode. Could legally be a NOP in this implementation; deferred until a test actually wants to sleep.
+- No AXI shim; CLINT is on the native ready/valid fabric. Plan is to wrap the dmem bus as AXI-Lite only when MMU work starts and we also want AXI peripherals (UartLite, IntC).
+- Single-hart CLINT. `mhartid` is hard 0 and the CLINT has exactly one msip / one mtimecmp.
+
 ## 2026-04-16 — Stage 3: A-extension green
 
 ### What shipped

@@ -33,10 +33,19 @@ module csr (
     input  logic        mret,          // asserted on MRET
     input  logic        retire,        // 1 cycle per successfully-committed insn
 
+    // external interrupt lines (level-sensitive, already debounced by source)
+    input  logic        ext_mti,
+    input  logic        ext_msi,
+    input  logic        ext_mei,
+
     // outputs visible to the core
     output logic [31:0] mtvec,
     output logic [31:0] mepc_out,      // PC to resume at on MRET
-    output logic        mstatus_mie
+    output logic        mstatus_mie,
+
+    // combinational interrupt-take decision and cause (priority MEI > MSI > MTI)
+    output logic        irq_pending,   // asserted while an interrupt can be taken at a boundary
+    output logic [31:0] irq_cause
 );
 
     // ------------- CSR storage -------------
@@ -62,6 +71,26 @@ module csr (
     assign mepc_out    = mepc_q;
     assign mstatus_mie = mstatus_q[`MSTATUS_MIE_BIT];
 
+    // ------------- mip / interrupt evaluation -------------
+    // Per spec, the MEIP/MTIP/MSIP bits are driven by the external interrupt
+    // sources and read-only from software's perspective in this core.
+    logic [31:0] mip_live;
+    always_comb begin
+        mip_live = 32'd0;
+        mip_live[`MIP_MSI_BIT] = ext_msi;
+        mip_live[`MIP_MTI_BIT] = ext_mti;
+        mip_live[`MIP_MEI_BIT] = ext_mei;
+    end
+
+    wire [31:0] mip_enabled = mip_live & mie_q;
+    // Priority: MEI > MSI > MTI (per privileged spec).
+    assign irq_pending = mstatus_q[`MSTATUS_MIE_BIT] && (mip_enabled != 32'd0);
+    always_comb begin
+        if      (mip_enabled[`MIP_MEI_BIT]) irq_cause = `CAUSE_IRQ_MEI;
+        else if (mip_enabled[`MIP_MSI_BIT]) irq_cause = `CAUSE_IRQ_MSI;
+        else                                irq_cause = `CAUSE_IRQ_MTI;
+    end
+
     // ------------- CSR read mux -------------
     logic [31:0] read_value;
     logic        addr_valid;
@@ -73,7 +102,7 @@ module csr (
             `CSR_MSTATUS:   read_value = mstatus_q;
             `CSR_MISA:      read_value = MISA_CONST;
             `CSR_MIE:       read_value = mie_q;
-            `CSR_MIP:       read_value = 32'd0; // Stage 1: no interrupts wired
+            `CSR_MIP:       read_value = mip_live;
             `CSR_MTVEC:     read_value = mtvec_q;
             `CSR_MSCRATCH:  read_value = mscratch_q;
             `CSR_MEPC:      read_value = mepc_q;

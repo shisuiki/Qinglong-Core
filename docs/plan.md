@@ -163,6 +163,23 @@ See `progress.md` for the full report.
 6. Reservation cleared on any trap.
 7. `rv32ua-p-*` regression: 10/10 under Verilator.
 
+## Stage 4 deliverables (basic bringup — native CLINT + interrupt delivery)
+
+1. `rtl/soc/clint.sv` — SiFive-style core-local interruptor at `0x0200_0000`: 64-bit free-running `mtime` (write-updatable), 64-bit `mtimecmp`, 1-bit `msip`. Outputs `mti = (mtime >= mtimecmp)` and `msi = msip[0]`. External `mei` routed through the core port but tied 0 at the SoC level (no AXI IntC yet).
+2. `csr.sv` — `mip` exposes live `MSIP/MTIP/MEIP` from the interrupt lines; `mie` writable; priority-encoded `irq_pending` + `irq_cause` outputs (MEI > MSI > MTI).
+3. `core_multicycle.sv` — interrupt check at the top of `S_FETCH`: if `mstatus.MIE && (mip & mie)` then commit a trap with `irq_cause`, `mepc = pc_q`, `mtval = 0`. Direct-mode `mtvec` only; vectored mode deferred.
+4. `soc_top.sv` — CLINT instantiated and decoded at `addr[31:20] == 12'h020`; `mti`/`msi` piped through the new core interrupt ports.
+5. `sw/tests/c/irq_timer.c`, `sw/tests/c/irq_swi.c` — exercise MTI and MSI end-to-end (mtvec install, mie+mstatus toggling, handler re-arms, mret, `mcause` check).
+
+Not in Stage 4 (deferred): WFI, vectored `mtvec`, MEI from an external intc, AXI shim, boot ROM.
+
+## Stage 4 status (closed 2026-04-16)
+
+- CLINT decodes and runs under Verilator. `mtime` increments every cycle; `mtimecmp` and `msip` writable via the dmem bus.
+- **irq_timer.c** passes in 2425 cycles (8 timer ticks at 200-cycle period, handler verifies `mcause == 0x80000007`).
+- **irq_swi.c** passes in 277 cycles (MSIP raise, handler verifies `mcause == 0x80000003`, clears MSIP).
+- Full riscv-tests regression still 70/76 — no regressions. CSR-read of `mip` now returns live pending bits instead of constant 0, with no test impact.
+
 ## Stage 3 status (closed 2026-04-16)
 
 - All 10 rv32ua tests pass (9 AMO variants + lrsc).

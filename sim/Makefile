@@ -22,6 +22,7 @@ RTL_FILES := \
     $(RTL_DIR)/core/core_multicycle.sv \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/soc/mmio.sv \
+    $(RTL_DIR)/soc/clint.sv \
     $(RTL_DIR)/soc/soc_top.sv \
     $(RTL_DIR)/soc/soc_tb_top.sv
 

@@ -112,6 +112,16 @@
 `define CAUSE_STORE_ACCESS_FAULT    32'd7
 `define CAUSE_ECALL_FROM_M          32'd11
 
+// ---------- interrupt causes (mcause MSB=1) ----------
+`define CAUSE_IRQ_MSI               32'h8000_0003
+`define CAUSE_IRQ_MTI               32'h8000_0007
+`define CAUSE_IRQ_MEI               32'h8000_000B
+
+// ---------- mip/mie bit positions ----------
+`define MIP_MSI_BIT  3
+`define MIP_MTI_BIT  7
+`define MIP_MEI_BIT  11
+
 // ---------- mstatus bit layout (RV32 M-mode subset) ----------
 // bit 3 MIE, bit 7 MPIE, bits 12:11 MPP.
 `define MSTATUS_MIE_BIT   3
