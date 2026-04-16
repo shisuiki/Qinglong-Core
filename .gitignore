@@ -1,0 +1,35 @@
+# Build artifacts
+sim/build/
+sim/build/**
+fpga/blinky/build/
+fpga/**/vivado*.jou
+fpga/**/vivado*.log
+fpga/**/.Xil/
+*.bit
+*.dcp
+*.rpt
+*.ltx
+*.jou
+
+# Compiled test binaries
+sw/tests/asm/*.elf
+sw/tests/asm/*.dump
+sw/tests/c/*.elf
+sw/tests/c/*.dump
+sw/tests/asm/*.o
+sw/tests/c/*.o
+
+# Vendored upstream riscv-tests — cloned separately, see sw/riscv-tests.md
+# and the "one-time setup" section in README.md.
+sw/riscv-tests/
+
+# Editor / OS
+*.swp
+*.swo
+.vscode/
+.idea/
+.DS_Store
+
+# Python cache (trace_diff.py gets cached)
+__pycache__/
+*.pyc
