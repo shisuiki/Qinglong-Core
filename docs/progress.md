@@ -20,6 +20,9 @@ Chronological log of what's been done and what's next. Newest entries at the top
 - **`mtvec` vectored mode supported.** When `mtvec[0]=1`, interrupt targets are `base + 4*cause_code` — exceptions still go to base. The `irq_cause_v[3:0]` field covers MSI=3 / MTI=7 / MEI=11.
 - **C regression harness.** New `make sim-c` target runs every ELF in `sw/tests/c/`, passing if the MMIO-exit-0 line appears in the log. Currently 6/6 green: `hello`, `muldiv`, `irq_timer`, `irq_swi`, `irq_wfi`, `irq_vectored`.
 
+### Counter-write fix (same day)
+- **`rv32mi-p-instret_overflow` now passes** (regression 70→71/76). Root cause: `csr.sv` applied both the retire-increment and a software `csrw` to `minstret`/`minstreth` in the same cycle; the 64-bit increment was overwriting bits the software write didn't touch (e.g. writing `minstreth` would zero the just-written low word because `retire`'s +1 also clobbered it). Fix is one-liner: gate the counter increment on "not writing to that counter this cycle" — per RISC-V spec, the software write wins. Applied symmetrically to `mcycle`/`mcycleh`.
+
 ### Caveats
 - No AXI shim; CLINT is on the native ready/valid fabric. Plan is to wrap the dmem bus as AXI-Lite only when MMU work starts and we also want AXI peripherals (UartLite, IntC).
 - Single-hart CLINT. `mhartid` is hard 0 and the CLINT has exactly one msip / one mtimecmp.

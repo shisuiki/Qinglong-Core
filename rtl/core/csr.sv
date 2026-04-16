@@ -173,8 +173,14 @@ module csr (
             mcycle_q   <= 64'd0;
             minstret_q <= 64'd0;
         end else begin
-            mcycle_q <= mcycle_q + 64'd1;
-            if (retire) minstret_q <= minstret_q + 64'd1;
+            // Free-running counters, but if a CSR write to the same counter
+            // is happening this cycle we must not let the increment clobber
+            // the written bits — the software write takes precedence.
+            if (!(do_write && (csr_addr == `CSR_MCYCLE   || csr_addr == `CSR_MCYCLEH)))
+                mcycle_q <= mcycle_q + 64'd1;
+            if (retire &&
+                !(do_write && (csr_addr == `CSR_MINSTRET || csr_addr == `CSR_MINSTRETH)))
+                minstret_q <= minstret_q + 64'd1;
 
             // Trap entry wins over an instruction's CSR write this cycle.
             if (trap_take) begin
