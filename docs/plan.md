@@ -18,21 +18,22 @@ captured below supersede it wherever they differ.
 | Device-tree compiler | `/usr/bin/dtc` 1.7.0 | installed from apt |
 | GCC host | 13.3.0 | |
 
-## Target board: SP701 (AMD Spartan-7 Evaluation Kit)
+## Target board: RealDigital Urbana (Spartan-7)
 
-The original plan assumed an Arty S7-50 (XC7S50). We actually have the larger **SP701**, XC7S100FGGA676-2. Notable deltas:
+(Previous drafts incorrectly identified this as an SP701 — actual JTAG IDCODE reports `xc7s50` and the user confirmed the board at Stage 2.5.)
 
-- **FPGA:** XC7S100 — ~102K logic cells, ~32K LUT6 (actually 64K 6-LUTs), 120 BRAM36, 160 DSP48E1. Comfortably larger than the plan's budget.
-- **DDR3:** MT8JTF12864HZ-1G6G1 (1 GB, 64-bit) — MIG-ready.
-- **Clocking:** 200 MHz differential (SYSCLK_P=AE8, N=AE7, LVDS_25).
-- **UART:** on-board CP2103 USB-serial. FPGA `UART_TX=Y21`, `UART_RX=Y22` (LVCMOS33). Exposed as `/dev/ttyUSB*` on host.
-- **2× Gigabit Ethernet (Marvell M88E1111, RGMII).** The plan's Stage 14 ESP32/PMOD path is superseded — we have native GigE on-board.
-- **8 LEDs** (J25, M24, L24, K25, K26, M25, L25, H22, LVCMOS33).
-- **5 pushbuttons** (AF23/AA20/AB20/AB22/AC22, LVCMOS18).
-- **16 DIP switches**, **6 PMOD connectors**, **QSPI flash** (N25Q256), **I2C**, **HDMI output** (to be confirmed per schematic).
-- **CPU_RESET button**: AE15 (LVCMOS18, active-high).
+- **FPGA:** `xc7s50csga324-1` — 32.6K LUT6, 65.2K FFs, 75 BRAM36 tiles, 120 DSP48E1. Plenty of room for the RV32IMA core.
+- **Clocking:** 100 MHz single-ended oscillator on N15 (LVCMOS33). Derive slower domains with an MMCM.
+- **UART:** FT2232H channel-B USB-UART bridge on the same cable as JTAG. Pin names on the master XDC are **host-perspective**: `uart_rxd = A16` is the FPGA's TX output; `uart_txd = B16` is the FPGA's RX input.
+- **LEDs:** 16 total at C13/C14/D14/D15/D16/F18/E17/D17/C17/B18/A17/B17/C18/D18/E18/G17 (LVCMOS33). Stage 2.5 uses the first 8 for a status bitmap.
+- **Buttons:** 4 at J2/J1/G2/H2 (LVCMOS25, **active-low**). Stage 2.5 uses BTN0 (J2) with PULLUP as CPU reset.
+- **Switches:** 16 slide switches, bank LVCMOS25.
+- **7-seg displays:** 2 × 4-digit units (`d0_*`, `d1_*` pins).
+- **RGB LEDs:** 2 × 3-channel (C9/A9/A10 + A11/C10/B11).
+- **HDMI out:** TMDS_33 on V17/U16/U18/R17/T14/U17/R16/R14.
+- **BLE UART, servomotor pins, PWM speakers** also exposed — deferred.
 
-Open questions to resolve opportunistically: exact HDMI pin mapping (UG1479 schematic), PMOD VADJ levels, USB host option (MAX3421 on a PMOD vs. native PHY on the board).
+Master pin inventory XDC for future peripherals: `/home/lain/lab6_1/pin_assignment/mb_intro_top.xdc`.
 
 ## Overall strategy
 
@@ -104,7 +105,7 @@ These addresses are deliberately in a non-standard range so nothing in `riscv-te
 - **Memory model Stage 0–1:** single 64 KB SRAM, unified, no cache, no MMU. Maps to `0x8000_0000–0x8001_FFFF` (matches riscv-tests default reset vector after linkage). MMIO region `0xD058_0000+`.
 - **Reset vector Stage 0–1:** 0x8000_0000 (matches riscv-tests linker). Stage 4 introduces a boot ROM at low address.
 - **Trace format:** one retirement per line, space-separated: `<priv> <pc_hex> (<insn_hex>) [x<rd> 0x<rd_value>]` — compatible with Spike's `--log-commits` output after light normalization.
-- **Clock for Stage 1 FPGA bring-up:** 50 MHz derived from MMCM off the 200 MHz differential input. 50 MHz is a safe target while the core is still a single-cycle blob.
+- **Clock for Stage 2.5 FPGA bring-up:** 50 MHz derived from an MMCM off the 100 MHz single-ended oscillator (N15). Stage 2.5 closes timing at this rate with ~2 ns of WNS margin on the -1 speed grade.
 
 ## Non-goals right now
 
@@ -136,6 +137,25 @@ See `progress.md` for the full report.
 - `muldiv.c` finishes in 256 cycles with `PASS` to MMIO.
 - `hello.c` rebuilt with `-march=rv32im_zicsr`; still passes.
 See `progress.md` for the full report.
+
+## Stage 2.5 deliverables (first real-CPU bringup on Urbana)
+
+1. Reorganize `fpga/` so all synthesizable RTL lives under `rtl/fpga/` and `fpga/` holds only constraints, TCL, per-project Makefiles, and (gitignored) build artifacts under `fpga/build/<project>/`.
+2. `rtl/soc/uart_tx.sv` — minimal 115200-8N1 transmitter with backpressure routed into `mmio.sv`'s `req_ready` so the core stalls on console writes instead of dropping bytes.
+3. `rtl/fpga/hello_top.sv` — MMCM (100→50 MHz), active-low reset sync, `soc_top` with `SRAM_INIT_FILE` parameter, `uart_tx` driving board pin A16, 8-LED diagnostic bitmap.
+4. `scripts/elf2mem.py` — flatten an RV32 ELF into a `$readmemh`-compatible image for `sram_dp` init.
+5. `fpga/constraints/urbana_{blinky,hello}.xdc`, `fpga/scripts/build_{blinky,hello}.tcl` + `prog_*.tcl`, per-project Makefiles in `fpga/{blinky,hello}/`.
+
+## Stage 2.5 status (closed 2026-04-16)
+
+- Blinky and hello both synth+impl+bitgen clean on `xc7s50csga324-1`. Hello closes timing at 50 MHz with WNS +2.036 ns, WHS +0.129 ns.
+- Utilization on hello: 2240 LUTs (6.87%), 731 FFs (1.12%), 16 BRAM tiles (21.3%), 4 DSP48E1 (3.3%).
+- Programmed over JTAG successfully. **LED diagnostics confirm the CPU ran hello.c end-to-end on silicon** — `exit_valid` latched, `console_valid` latched at least once, `commit_valid` retiring instructions, MMCM locked, core out of reset.
+- **Known residual:** UART bytes are not reaching `/dev/ttyUSB1` from the host side. Most likely a subtle pinout/enumeration issue with the FT2232H on Urbana that we'll revisit when we wire AXI and AXI UartLite properly (likely Stage 5/6). The CPU-side of the UART path is exercised and working; only host-side capture is unverified.
+
+## Stage 3 deliverables (A-extension)
+
+Still scoped as originally planned (LR/SC + AMO opcodes, A-ext regression). Board UART capture is a prerequisite to taking real console interaction off the critical path, but not a blocker for Stage 3.
 
 ## Open questions
 

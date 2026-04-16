@@ -2,7 +2,7 @@
 #
 # Always `source scripts/env.sh` first so Verilator and Spike are on PATH.
 
-.PHONY: help sim sim-all riscv-tests clean synth prog blinky-synth blinky-prog spike-check
+.PHONY: help sim sim-all riscv-tests clean synth prog blinky-synth blinky-prog hello-synth hello-prog spike-check
 
 help:
 	@echo "Targets:"
@@ -12,6 +12,8 @@ help:
 	@echo "  make spike-check                        # sanity-check spike is on PATH"
 	@echo "  make blinky-synth                       # Vivado synth+impl of blinky"
 	@echo "  make blinky-prog                        # program blinky bitstream"
+	@echo "  make hello-synth                        # Vivado synth+impl of hello-world SoC"
+	@echo "  make hello-prog                         # program hello bitstream"
 	@echo "  make clean"
 
 spike-check:
@@ -41,6 +43,13 @@ blinky-synth:
 
 blinky-prog:
 	$(MAKE) -C fpga/blinky prog
+
+hello-synth:
+	$(MAKE) -C sw/tests/c hello.elf
+	$(MAKE) -C fpga/hello synth
+
+hello-prog:
+	$(MAKE) -C fpga/hello prog
 
 clean:
 	rm -rf sim/build/obj_dir sim/build/*.log sim/build/*.trace sim/build/*.vcd

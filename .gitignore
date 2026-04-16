@@ -1,9 +1,10 @@
 # Build artifacts
 sim/build/
 sim/build/**
-fpga/blinky/build/
+fpga/build/
 fpga/**/vivado*.jou
 fpga/**/vivado*.log
+fpga/**/vivado*.str
 fpga/**/.Xil/
 *.bit
 *.dcp
@@ -18,6 +19,7 @@ sw/tests/c/*.elf
 sw/tests/c/*.dump
 sw/tests/asm/*.o
 sw/tests/c/*.o
+sw/tests/c/*.mem
 
 # Vendored upstream riscv-tests — cloned separately, see sw/riscv-tests.md
 # and the "one-time setup" section in README.md.

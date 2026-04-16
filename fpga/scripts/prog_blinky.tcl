@@ -11,7 +11,7 @@ if {[info exists ::env(BITSTREAM)]} {
     set bitstream [file normalize $::env(BITSTREAM)]
 } else {
     set script_dir [file normalize [file dirname [info script]]]
-    set bitstream  [file normalize [file join $script_dir .. blinky build blinky.bit]]
+    set bitstream  [file normalize [file join $script_dir .. build blinky blinky.bit]]
 }
 
 if {![file exists $bitstream]} {
@@ -37,14 +37,14 @@ set target_dev  ""
 foreach dev $all_devices {
     set dev_name [get_property PART $dev]
     puts "==> prog_blinky: found device: $dev  (part=$dev_name)"
-    if {[string match "xc7s100*" $dev_name]} {
+    if {[string match "xc7s50*" $dev_name]} {
         set target_dev $dev
         break
     }
 }
 
 if {$target_dev eq ""} {
-    puts "ERROR: no xc7s100 device found on the JTAG chain"
+    puts "ERROR: no xc7s50 device found on the JTAG chain"
     close_hw_target
     disconnect_hw_server
     exit 1

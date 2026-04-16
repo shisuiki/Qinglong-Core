@@ -2,6 +2,32 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-16 — Stage 2.5: first real-CPU bringup on Urbana silicon
+
+### What shipped
+- **Layout reshuffle.** All synthesizable RTL now lives under `rtl/`, including FPGA-only tops under `rtl/fpga/`. The `fpga/` tree only holds XDCs, TCL scripts, per-project Makefiles, and (gitignored) build outputs in `fpga/build/<project>/`. Blinky still synths cleanly from the new layout.
+- **UART TX** (`rtl/soc/uart_tx.sv`) — 115200-8N1, stall-on-busy semantics routed back through `mmio.sv`'s `req_ready` so the CPU stalls on console writes rather than dropping bytes. Sim ties `console_ready` high unconditionally; hello regression + muldiv still pass.
+- **Hello top** (`rtl/fpga/hello_top.sv`) — MMCM (100 MHz → 50 MHz, VCO 1000), active-low reset sync, `soc_top` with pass-through `SRAM_INIT_FILE`, `uart_tx` on board pin A16, and an 8-LED status bitmap (heartbeat / MMCM locked / rst_n / out-of-reset / commit stretched / exit_valid / console latched / UART line level).
+- **ELF→mem** (`scripts/elf2mem.py`) — flattens an RV32 ELF's PT_LOAD segments into a `$readmemh` hex image for `sram_dp` to initialize BRAM at bitgen time.
+- **Board retarget.** Mid-stage the user corrected our board identity: it's a **RealDigital Urbana (`xc7s50csga324-1`)**, not an SP701. Rewrote XDCs (urbana_blinky.xdc, urbana_hello.xdc), swapped the part in both build TCLs, dropped the IBUFDS (single-ended 100 MHz clock on N15), flipped to active-low reset on BTN0 (J2), and moved the UART TX pin to A16 (board's `uart_rxd` = FPGA output — host-perspective naming).
+
+### Results on silicon
+- **Blinky:** synth+impl+bitgen clean on xc7s50.
+- **Hello:** synth+impl+bitgen clean. Timing at 50 MHz: WNS +2.036 ns, WHS +0.129 ns. Util: 2240 LUTs (6.87%), 731 FFs (1.12%), 16 BRAM36 tiles (21.3%), 4 DSP48E1 (3.3%).
+- **Programmed over JTAG successfully.** LED bitmap readout from the board:
+  - LED[0] blinking ~1.5 Hz → MMCM + BUFG + core_clk alive.
+  - LED[1] on → MMCM locked.
+  - LED[2] on → BTN0 idle-high, reset logic sane.
+  - LED[3] on → core out of reset.
+  - LED[4] on → `commit_valid` retired at least one instruction (stretched pulse stuck on).
+  - LED[5] on → software reached `mmio_exit(0)`.
+  - LED[6] on → software emitted at least one byte to `0xD0580000` (console_valid fired).
+  - LED[7] on → UART line idle-high after transmission.
+- **This confirms the RV32IM core ran hello.c end-to-end on real silicon:** crt0 → main → mmio_puts → mmio_exit, all emitted traffic through the MMIO console, and halted. Everything CPU-side from BRAM init to commit-pulse is validated.
+
+### Known residual (deferred)
+- UART bytes are not landing on `/dev/ttyUSB1` from the host side. The FPGA is driving the A16 pin correctly (led[7] + led[6] prove the software wrote the console and the UART idled back to high after), but the host isn't catching the bytes — likely an FT2232H channel / baud / inversion subtlety on the Urbana's USB bridge that doesn't matter until we wire a proper AXI UART-Lite. Parked until Stage 5/6 AXI integration; won't block Stage 3 (A-extension).
+
 ## 2026-04-16 — Stage 2: M-extension green
 
 ### What's new

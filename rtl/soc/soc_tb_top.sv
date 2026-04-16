@@ -23,6 +23,7 @@ module soc_tb_top (
     soc_top u_soc (
         .clk(clk), .rst(rst),
         .console_valid(console_valid), .console_byte(console_byte),
+        .console_ready(1'b1),                                        // sim: UART is infinitely fast
         .exit_valid(exit_valid), .exit_code(exit_code),
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),

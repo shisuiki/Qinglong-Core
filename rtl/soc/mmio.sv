@@ -25,6 +25,7 @@ module mmio (
     // simulation/FPGA taps
     output logic        console_valid,
     output logic [7:0]  console_byte,
+    input  logic        console_ready,   // back-pressure from UART TX (tie high in sim)
     output logic        exit_valid,
     output logic [31:0] exit_code
 );
@@ -33,7 +34,10 @@ module mmio (
     localparam logic [31:0] ADDR_EXIT    = 32'hD058_0004;
     localparam logic [31:0] ADDR_STATUS  = 32'hD058_0008;
 
-    assign req_ready = 1'b1;
+    // Stall console byte stores when the UART is busy; everything else is
+    // always ready.
+    wire is_console_store = req_valid && req_wen && (req_addr == ADDR_CONSOLE);
+    assign req_ready = is_console_store ? console_ready : 1'b1;
 
     logic        console_valid_q;
     logic [7:0]  console_byte_q;
@@ -66,7 +70,7 @@ module mmio (
             rsp_valid_q     <= 1'b0;
             rsp_fault_q     <= 1'b0;
 
-            if (req_valid) begin
+            if (req_valid && req_ready) begin
                 rsp_valid_q <= 1'b1;
                 rsp_rdata_q <= 32'd0;
                 unique case (req_addr)

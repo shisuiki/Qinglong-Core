@@ -9,13 +9,15 @@
 
 module soc_top #(
     parameter int          SRAM_WORDS = 16384,  // 64 KiB
-    parameter logic [31:0] RESET_PC   = 32'h8000_0000
+    parameter logic [31:0] RESET_PC   = 32'h8000_0000,
+    parameter              SRAM_INIT_FILE = ""
 )(
     input  logic clk,
     input  logic rst,
 
     output logic        console_valid,
     output logic [7:0]  console_byte,
+    input  logic        console_ready,   // back-pressure from an external UART (tie 1 in sim)
     output logic        exit_valid,
     output logic [31:0] exit_code,
 
@@ -113,7 +115,7 @@ module soc_top #(
     end
 
     // ---------- SRAM ----------
-    sram_dp #(.WORDS(SRAM_WORDS)) u_sram (
+    sram_dp #(.WORDS(SRAM_WORDS), .INIT_FILE(SRAM_INIT_FILE)) u_sram (
         .clk(clk),
         .a_req_valid(if_req_valid), .a_req_addr(if_req_addr),
         .a_req_ready(if_req_ready),
@@ -138,6 +140,7 @@ module soc_top #(
         .req_ready(mmio_req_ready),
         .rsp_valid(mmio_rsp_valid), .rsp_rdata(mmio_rsp_rdata), .rsp_fault(mmio_rsp_fault),
         .console_valid(console_valid), .console_byte(console_byte),
+        .console_ready(console_ready),
         .exit_valid(exit_valid), .exit_code(exit_code)
     );
 

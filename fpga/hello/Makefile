@@ -1,8 +1,13 @@
 # -----------------------------------------------------------------------------
-# Makefile for the SP701 blinky smoke test.
+# Makefile for the SP701 hello-world CPU bringup.
 #
-# All build artifacts land in $repo/fpga/build/blinky/ — nothing RTL lives in
-# this directory; the sources are under $repo/rtl/fpga/.
+#   make hello.mem        (re)generate BRAM init image from sw/tests/c/hello.elf
+#   make synth            vivado non-project flow → build/hello/hello.bit
+#   make prog             program over JTAG
+#   make clean            wipe artifacts
+#
+# RTL lives under $repo/rtl/.  This directory only holds the Makefile +
+# the generated hello.mem (gitignored).
 # -----------------------------------------------------------------------------
 
 SHELL := /bin/bash
@@ -10,20 +15,30 @@ SHELL := /bin/bash
 VIVADO_SETTINGS := /opt/Xilinx/2025.2/Vivado/settings64.sh
 VIVADO_LAB_BIN  := /opt/Xilinx/2025.2/Vivado_Lab/bin/vivado_lab
 
-BUILD_DIR       := ../build/blinky
-BITSTREAM       := $(BUILD_DIR)/blinky.bit
+REPO_DIR   := $(abspath ../..)
+BUILD_DIR  := ../build/hello
+BITSTREAM  := $(BUILD_DIR)/hello.bit
 
-BUILD_TCL       := ../scripts/build_blinky.tcl
-PROG_TCL        := ../scripts/prog_blinky.tcl
+ELF        ?= $(REPO_DIR)/sw/tests/c/hello.elf
+MEM        := hello.mem
+
+BUILD_TCL  := ../scripts/build_hello.tcl
+PROG_TCL   := ../scripts/prog_hello.tcl
 
 VIVADO_BATCH_FLAGS := -mode batch
 
-.PHONY: synth prog clean
+.PHONY: synth prog clean mem
 
-synth:
+mem: $(MEM)
+
+$(MEM): $(ELF) $(REPO_DIR)/scripts/elf2mem.py
+	$(REPO_DIR)/scripts/elf2mem.py $(ELF) $(MEM)
+
+synth: $(MEM)
 	@mkdir -p $(BUILD_DIR)
 	@echo "==> sourcing Vivado settings and running $(BUILD_TCL)"
 	. $(VIVADO_SETTINGS) && \
+	    SRAM_INIT_FILE=$(abspath $(MEM)) \
 	    vivado $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/vivado.log \
 	        -journal $(BUILD_DIR)/vivado.jou \
@@ -31,21 +46,18 @@ synth:
 
 prog:
 	@mkdir -p $(BUILD_DIR)
-	@echo "==> programming SP701 over JTAG"
+	@echo "==> programming SP701 with hello.bit over JTAG"
 	@if command -v vivado_lab >/dev/null 2>&1; then \
-	    echo "==> using vivado_lab from PATH"; \
 	    vivado_lab $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/prog.log \
 	        -journal $(BUILD_DIR)/prog.jou \
 	        -source $(PROG_TCL); \
 	elif [ -x $(VIVADO_LAB_BIN) ]; then \
-	    echo "==> using $(VIVADO_LAB_BIN)"; \
 	    $(VIVADO_LAB_BIN) $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/prog.log \
 	        -journal $(BUILD_DIR)/prog.jou \
 	        -source $(PROG_TCL); \
 	else \
-	    echo "==> vivado_lab not found; falling back to full Vivado"; \
 	    . $(VIVADO_SETTINGS) && \
 	    vivado $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/prog.log \
@@ -55,5 +67,5 @@ prog:
 
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f vivado*.log vivado*.jou vivado*.str
+	rm -f  $(MEM) vivado*.log vivado*.jou vivado*.str
 	rm -rf .Xil
