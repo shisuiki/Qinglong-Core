@@ -3,8 +3,8 @@
 A small, from-scratch RV32 soft core for the AMD SP701 (Spartan-7 XC7S100) FPGA,
 built stage by stage toward a Linux-capable SoC.
 
-Named after Chen Qianyu from *Arknights: Endfield* — "Qinglong" (青龙), the Azure
-Dragon of the East. The core is still pretty dumb, but it's getting there.
+Named after Chen Qianyu from *Arknights: Endfield* — "青龙角、马尾辫、两把傻不愣登的剑~ 陈千语！“ The core is pretty dumb, but it's getting there - where's there? I don't know either to be honest.
+!(https://i0.hdslb.com/bfs/new_dyn/5c0a617963c872e091d3506bb8afcd893461577311259436.gif)
 
 ## Status (Stage 1)
 
