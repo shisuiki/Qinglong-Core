@@ -59,7 +59,12 @@ module core_multicycle #(
     // =========================================================================
     // State
     // =========================================================================
-    typedef enum logic [1:0] {S_FETCH = 2'd0, S_EXEC = 2'd1, S_MEM = 2'd2} state_t;
+    typedef enum logic [1:0] {
+        S_FETCH = 2'd0,
+        S_EXEC  = 2'd1,
+        S_MEM   = 2'd2,
+        S_DIV   = 2'd3
+    } state_t;
     state_t state_q;
 
     logic [31:0] pc_q;
@@ -98,6 +103,11 @@ module core_multicycle #(
     wire is_mret   = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h302);
     wire is_csr    = is_system && (funct3 != `F3_PRIV);
     wire is_priv_op = is_ecall | is_ebreak | is_mret;
+
+    // M-extension: funct7 == 0000001 with OP.  funct3[2] splits MUL-group (0) from DIV-group (1).
+    wire is_muldiv      = is_op && (funct7 == `F7_MULDIV);
+    wire is_mul_variant = is_muldiv && !funct3[2];
+    wire is_div_variant = is_muldiv &&  funct3[2];
 
     // =========================================================================
     // Sub-blocks
@@ -140,6 +150,40 @@ module core_multicycle #(
         .mret(do_mret),
         .retire(commit_valid && !commit_trap),
         .mtvec(mtvec_v), .mepc_out(mepc_v), .mstatus_mie(mstatus_mie_v)
+    );
+
+    // M-extension: combinational multiplier (1 EX cycle) + iterative divider (32 cycles).
+    // MUL   : a_signed=0, b_signed=0, hi=0 (low 32)
+    // MULH  : a_signed=1, b_signed=1, hi=1
+    // MULHSU: a_signed=1, b_signed=0, hi=1
+    // MULHU : a_signed=0, b_signed=0, hi=1
+    wire         mul_a_signed = (funct3 == `F3_MULH) || (funct3 == `F3_MULHSU);
+    wire         mul_b_signed = (funct3 == `F3_MULH);
+    wire         mul_hi       = (funct3 != `F3_MUL);
+    logic [31:0] mul_result;
+    mul_unit u_mul (
+        .a(rs1_data), .b(rs2_data),
+        .a_signed(mul_a_signed), .b_signed(mul_b_signed),
+        .hi(mul_hi),
+        .result(mul_result)
+    );
+
+    logic        div_start;
+    logic        div_busy, div_done;
+    logic [31:0] div_result;
+    // DIV=100, DIVU=101, REM=110, REMU=111.  funct3[0]=0 → signed; funct3[1]=1 → rem.
+    wire         div_is_signed = !funct3[0];
+    wire         div_want_rem  =  funct3[1];
+    div_unit u_div (
+        .clk(clk), .rst(rst),
+        .start(div_start),
+        .is_signed(div_is_signed),
+        .want_rem(div_want_rem),
+        .dividend(rs1_data),
+        .divisor(rs2_data),
+        .busy(div_busy),
+        .done(div_done),
+        .result(div_result)
     );
 
     // =========================================================================
@@ -209,7 +253,7 @@ module core_multicycle #(
             if ((funct7 != 7'b0000000) && (funct7 != 7'b0100000)) illegal_opcode = 1'b1;
         end
 
-        // OP register-register funct7 checks
+        // OP register-register funct7 checks (RV32I + RV32M)
         if (is_op) begin
             case ({funct7, funct3})
                 {7'b0000000, `F3_ADD_SUB}, {7'b0100000, `F3_ADD_SUB},
@@ -219,7 +263,12 @@ module core_multicycle #(
                 {7'b0000000, `F3_XOR},
                 {7'b0000000, `F3_SRL_SRA}, {7'b0100000, `F3_SRL_SRA},
                 {7'b0000000, `F3_OR},
-                {7'b0000000, `F3_AND}: /* ok */ ;
+                {7'b0000000, `F3_AND},
+                // RV32M
+                {`F7_MULDIV, `F3_MUL},    {`F7_MULDIV, `F3_MULH},
+                {`F7_MULDIV, `F3_MULHSU}, {`F7_MULDIV, `F3_MULHU},
+                {`F7_MULDIV, `F3_DIV},    {`F7_MULDIV, `F3_DIVU},
+                {`F7_MULDIV, `F3_REM},    {`F7_MULDIV, `F3_REMU}: /* ok */ ;
                 default: illegal_opcode = 1'b1;
             endcase
         end
@@ -347,6 +396,7 @@ module core_multicycle #(
         arith_wb = alu_y;
         if (is_jal || is_jalr) arith_wb = pc_q + 32'd4;
         if (is_csr)            arith_wb = csr_rdata;
+        if (is_mul_variant)    arith_wb = mul_result;
     end
 
     // =========================================================================
@@ -432,7 +482,8 @@ module core_multicycle #(
         rf_rd  = 5'd0;
         rf_wd  = 32'd0;
 
-        csr_en = 1'b0;
+        csr_en    = 1'b0;
+        div_start = 1'b0;
 
         commit_valid   = 1'b0;
         commit_pc      = pc_q;
@@ -504,8 +555,15 @@ module core_multicycle #(
                         is_load_d      = is_load;
                         state_d        = S_MEM;
                     end
+                end else if (is_div_variant) begin
+                    // Kick off the iterative divider; commit happens in S_DIV when done pulses.
+                    div_start   = 1'b1;
+                    rd_d        = rd_i;
+                    pc_of_mem_d = pc_q;      // reuse mem-path latches to park the pending commit
+                    instr_of_mem_d = instr_q;
+                    state_d     = S_DIV;
                 end else begin
-                    // Single-cycle commit path (arith / JAL / JALR / LUI / AUIPC / branch / CSR / FENCE).
+                    // Single-cycle commit path (arith / JAL / JALR / LUI / AUIPC / branch / CSR / FENCE / MUL*).
                     // Writeback for everything that has an rd other than branch/store/priv-non-mret.
                     logic wb_en;
                     wb_en = (is_lui | is_auipc | is_jal | is_jalr | is_op_imm | is_op | is_csr)
@@ -559,6 +617,29 @@ module core_multicycle #(
                         pc_d    = pc_of_mem_q + 32'd4;
                         state_d = S_FETCH;
                     end
+                end
+            end
+
+            // -------------------------------------------------------------
+            S_DIV: begin
+                // Wait for the divider to pulse `done`, then commit the result.
+                if (div_done) begin
+                    logic wb_en_div;
+                    wb_en_div = (rd_q != 5'd0);
+
+                    rf_wen = wb_en_div;
+                    rf_rd  = rd_q;
+                    rf_wd  = div_result;
+
+                    commit_valid   = 1'b1;
+                    commit_pc      = pc_of_mem_q;
+                    commit_insn    = instr_of_mem_q;
+                    commit_rd_wen  = wb_en_div;
+                    commit_rd_addr = rd_q;
+                    commit_rd_data = div_result;
+
+                    pc_d    = pc_of_mem_q + 32'd4;
+                    state_d = S_FETCH;
                 end
             end
 

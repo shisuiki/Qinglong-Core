@@ -17,6 +17,8 @@ RTL_FILES := \
     $(RTL_DIR)/core/imm_gen.sv \
     $(RTL_DIR)/core/regfile.sv \
     $(RTL_DIR)/core/csr.sv \
+    $(RTL_DIR)/core/mul_unit.sv \
+    $(RTL_DIR)/core/div_unit.sv \
     $(RTL_DIR)/core/core_multicycle.sv \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/soc/mmio.sv \

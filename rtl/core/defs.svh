@@ -47,6 +47,17 @@
 `define F3_SH       3'b001
 `define F3_SW       3'b010
 
+// ---------- M extension (funct7 = 0000001 with OP) ----------
+`define F7_MULDIV   7'b0000001
+`define F3_MUL      3'b000
+`define F3_MULH     3'b001
+`define F3_MULHSU   3'b010
+`define F3_MULHU    3'b011
+`define F3_DIV      3'b100
+`define F3_DIVU     3'b101
+`define F3_REM      3'b110
+`define F3_REMU     3'b111
+
 // ---------- funct3 for SYSTEM ----------
 `define F3_PRIV     3'b000
 `define F3_CSRRW    3'b001

@@ -2,6 +2,24 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-16 — Stage 2: M-extension green
+
+### What's new
+- **Multiplier:** `rtl/core/mul_unit.sv` — combinational 33×33 signed multiply covering MUL/MULH/MULHSU/MULHU via operand sign-extension. One EX cycle, DSP48E1 inferable on the SP701. Lives inside the existing S_EXEC writeback mux via `arith_wb`.
+- **Divider:** `rtl/core/div_unit.sv` — iterative restoring divider, 32-cycle FSM (`S_IDLE → S_INIT → S_COMPUTE → S_FIXUP`). Handles every RV32M corner case: divide-by-zero (Q=-1, R=dividend) and signed overflow INT_MIN/-1 (Q=INT_MIN, R=0). Handshake is a 1-cycle `start` pulse and a `done` pulse.
+- **Core integration:** `core_multicycle.sv` grows a fourth state `S_DIV`. DIV/DIVU/REM/REMU issue `div_start` in S_EXEC, the FSM parks pending rd/pc/instr in the mem-latches (reused), and commits in S_DIV when `div_done` pulses. MUL variants commit in S_EXEC the same cycle, same as regular arithmetic. Illegal-opcode decode widened to accept `funct7=0000001` with all eight M funct3s.
+- **defs.svh:** Added `F7_MULDIV`, `F3_MUL`, `F3_MULH`, `F3_MULHSU`, `F3_MULHU`, `F3_DIV`, `F3_DIVU`, `F3_REM`, `F3_REMU`.
+
+### Tests
+- **rv32um regression: 8 / 8.**  `div`, `divu`, `mul`, `mulh`, `mulhsu`, `mulhu`, `rem`, `remu` — all pass under `make sim-all` with `FAMILIES="rv32um"`.
+- **Full regression:** 60 / 66. The 6 failures are the same Stage-1 out-of-scope set (PMP, Zicntr, Smrnmi, unaligned-access) — no Stage-2 regressions.
+- **C demo:** `sw/tests/c/muldiv.c` — covers all four MUL variants (inline-asm to drive MULH/MULHU/MULHSU explicitly), signed and unsigned DIV/REM, divide-by-zero, and INT_MIN/-1 signed overflow. Runs in 256 cycles.
+- **Rebuilt `hello.c`** with `-march=rv32im_zicsr`: the compiler now emits hardware MUL/DIV where available. Still passes, 2640 cycles.
+
+### Caveats
+- Divider is restoring (1 bit per cycle). Fine for Stage 2; Stage 3 may swap in a faster non-restoring or SRT variant if cycle counts become the bottleneck in A-ext tests.
+- No multi-issue or back-to-back division: `div_unit` exposes `busy` but the core only starts a new op after reaching S_FETCH post-commit, so the signal is unused at the core level.
+
 ## 2026-04-16 — Stage 0 and Stage 1 green
 
 ### What works end-to-end

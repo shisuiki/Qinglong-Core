@@ -5,7 +5,7 @@ OBJDUMP:= $(RISCV_PREFIX)objdump
 COMMON := ../../common
 LDFILE := $(COMMON)/link.ld
 
-CFLAGS := -march=rv32i_zicsr -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding \
+CFLAGS := -march=rv32im_zicsr -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding \
           -Os -Wall -Wextra -I$(COMMON)
 LDFLAGS:= -T $(LDFILE) -static -Wl,--no-relax
 

@@ -109,7 +109,7 @@ These addresses are deliberately in a non-standard range so nothing in `riscv-te
 ## Non-goals right now
 
 - Caches, MMU, pipelining — not until Stage 5/6.
-- M-extension (multiply/divide), A-extension — not until Stage 2/3.
+- A-extension — Stage 3.
 - FPU, C (compressed) — deferred indefinitely.
 - Linux — Stage 7.
 
@@ -120,6 +120,21 @@ Stage 0 + Stage 1 are complete at the "reference implementation" level.
 - Trace-diff against Spike matches 100 % of retired instructions on validated tests (rv32ui-p-simple, rv32ui-p-add).
 - C demo runs correctly.
 - FPGA synth flow verified (blinky) but nothing programmed onto the board yet.
+See `progress.md` for the full report.
+
+## Stage 2 deliverables (M-extension)
+
+1. `rtl/core/mul_unit.sv`: combinational 33×33 signed multiplier. One funct3-decoded instance drives MUL/MULH/MULHSU/MULHU. DSP48E1 inferable on SP701.
+2. `rtl/core/div_unit.sv`: iterative restoring divider, 32 cycles, FSM internal. Full DIV/DIVU/REM/REMU semantics including div-by-zero and signed overflow.
+3. `core_multicycle.sv` picks up a fourth FSM state `S_DIV` for the multi-cycle divider; MUL commits in `S_EXEC` through the normal writeback path.
+4. `rv32um-p-*` regression: 8/8 under Verilator.
+5. `sw/tests/c/muldiv.c`: C demo hitting every M variant + corner cases, compiled `-march=rv32im_zicsr`.
+
+## Stage 2 status (closed 2026-04-16)
+
+- All 8 rv32um tests pass; full regression at 60/66 (same out-of-scope Stage-1 failures, no Stage-2 regressions).
+- `muldiv.c` finishes in 256 cycles with `PASS` to MMIO.
+- `hello.c` rebuilt with `-march=rv32im_zicsr`; still passes.
 See `progress.md` for the full report.
 
 ## Open questions
