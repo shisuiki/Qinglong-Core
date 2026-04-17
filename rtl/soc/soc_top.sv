@@ -79,7 +79,11 @@ module soc_top #(
     // ---------- interrupt inputs from CLINT ----------
     logic clint_mti, clint_msi;
 
+`ifdef USE_PIPELINE_CORE
+    core_pipeline #(.RESET_PC(RESET_PC)) u_core (
+`else
     core_multicycle #(.RESET_PC(RESET_PC)) u_core (
+`endif
         .clk(clk), .rst(rst),
 
         .ifetch_req_valid(if_req_valid), .ifetch_req_addr(if_req_addr), .ifetch_req_ready(if_req_ready),

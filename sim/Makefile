@@ -20,6 +20,7 @@ RTL_FILES := \
     $(RTL_DIR)/core/mul_unit.sv \
     $(RTL_DIR)/core/div_unit.sv \
     $(RTL_DIR)/core/core_multicycle.sv \
+    $(RTL_DIR)/core/core_pipeline.sv \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/mem/axil_bram_slave.sv \
     $(RTL_DIR)/mem/axil_uartlite_sim.sv \
@@ -52,6 +53,15 @@ TEST ?=
 TIMEOUT ?= 2000000
 TRACE   ?=
 VCD     ?=
+# CORE=pipeline selects core_pipeline via +define; default (unset) uses core_multicycle.
+CORE    ?=
+
+ifeq ($(CORE),pipeline)
+VERILATOR_FLAGS += -DUSE_PIPELINE_CORE
+endif
+ifneq ($(DEBUG_PIPE),)
+VERILATOR_FLAGS += -DDEBUG_PIPE
+endif
 
 .PHONY: build run clean sim-all
 
