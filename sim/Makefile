@@ -21,8 +21,11 @@ RTL_FILES := \
     $(RTL_DIR)/core/div_unit.sv \
     $(RTL_DIR)/core/core_multicycle.sv \
     $(RTL_DIR)/mem/sram_dp.sv \
+    $(RTL_DIR)/mem/axil_bram_slave.sv \
+    $(RTL_DIR)/mem/axil_uartlite_sim.sv \
     $(RTL_DIR)/soc/mmio.sv \
     $(RTL_DIR)/soc/clint.sv \
+    $(RTL_DIR)/soc/axi_lite_master.sv \
     $(RTL_DIR)/soc/soc_top.sv \
     $(RTL_DIR)/soc/soc_tb_top.sv
 

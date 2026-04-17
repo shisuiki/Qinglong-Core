@@ -20,6 +20,9 @@ sw/tests/c/*.dump
 sw/tests/asm/*.o
 sw/tests/c/*.o
 sw/tests/c/*.mem
+sw/freertos/build/
+sw/freertos/*.elf
+sw/freertos/*.dump
 fpga/**/*.mem
 
 # Vendored upstream riscv-tests — cloned separately, see sw/riscv-tests.md

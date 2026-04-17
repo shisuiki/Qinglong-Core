@@ -2,6 +2,92 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-17 — Stage 5.5: FreeRTOS bringup (sim + silicon)
+
+### What shipped
+- **Vendored `FreeRTOS-Kernel` V11.1.0** as `third_party/FreeRTOS-Kernel/` (shallow clone, tag `V11.1.0`, commit `dbf70559b27d39c1fdb68dfb9a32140b6a6777a0`). Using the stock `portable/GCC/RISC-V/` port with the `RV32I_CLINT_no_extensions` chip-specific extensions.
+- **`sw/freertos/`** — self-contained FreeRTOS demo:
+  - `FreeRTOSConfig.h` points the tick path at our CLINT: `configMTIME_BASE_ADDRESS = 0x0200BFF8`, `configMTIMECMP_BASE_ADDRESS = 0x02004000`, `configCPU_CLOCK_HZ = 50_000_000`, tick = 1 kHz.
+  - `main.c` creates two tasks (`hello` @ pri 2, 250 ms; `blink` @ pri 1, 500 ms), both printing through AXI UartLite (`sw/common/uartlite.h`). **Critical gotcha**: the FreeRTOS RISC-V port does NOT set `mtvec` itself — the app must install `freertos_risc_v_trap_handler` before `vTaskStartScheduler()`. Skipping this sent the core into a trap loop at `mtvec=0` that silently ran forever.
+  - `crt0.S`, `link.ld`: 64 KiB SRAM at `0x80000000`, our own startup; `-nostartfiles` suppresses picolibc's crt0 so ours wins.
+  - `Makefile` uses `-specs=picolibc.specs` (Debian `picolibc-riscv64-unknown-elf` pkg) for `memset/memcpy/strlen/strcpy`. Linked against picolibc's `rv32im/ilp32` multilib (close enough for FreeRTOS; A-ext instructions are only user-emitted). Two variants: default exits after 10 `hello` prints (`mmio_exit(0)` — grades in sim), `make fpga` leaves the scheduler running forever.
+- **Sim UartLite stub** (`rtl/mem/axil_uartlite_sim.sv`) — behavioural AMD-UartLite register model that emits TX-FIFO bytes as `$write("%c", b)` directly to Verilator stdout. `STAT` reads 0 so polling drivers proceed immediately. Now the sim and FPGA exercise the same UART code path.
+- **Tiny 1→2 AXI-Lite decoder** in `soc_tb_top.sv` — routes `addr[12]=0` → UartLite stub (`0xC0000000`), `addr[12]=1` → BRAM (`0xC0001000`), so `axi_bram.S` still has a RAM to poke (moved its target base). One outstanding transaction assumption (matches the master shim), so sel state is just a pair of latches per channel.
+- **`fpga/freertos/`** — drops in the FreeRTOS ELF under the existing `axi_hello_top` bitstream; same `build_axi_hello.tcl`, different `SRAM_INIT_FILE`. Top-level `make freertos-synth` / `freertos-prog` targets added.
+
+### Tests
+- **Sim:** `make run TEST=sw/freertos/freertos_demo.elf` — boots, runs both tasks with the correct 2:1 priority ratio (every blink cycle sees two hellos), emits `PASS` and `MMIO exit 0` after 10 hellos. Total runtime ≈ 112.5 M cycles (~2.25 s @ 50 MHz).
+- **Silicon:** 2026-04-17 10:29 — programmed the Urbana board with the forever variant, captured `/dev/ttyUSB1` over ~6 s:
+
+  ```
+  FreeRTOS booting on RV32IMA SoC
+  hello #0
+  [blink 0]
+  hello #1
+  hello #2
+  [blink 1]
+  ...
+  hello #37
+  hello #38
+  [blink 19]
+  ```
+
+  39 `hello` prints + 20 `blink` prints = clean 2:1 scheduling ratio matches the 250 ms / 500 ms tick configuration at 1 kHz tick rate. First RTOS running on this core. Image footprint: 10.7 KiB text + 9.5 KiB BSS = ~20 KiB in the 64 KiB SRAM.
+
+### Caveats
+- No UART-RX-driven tasks yet — UartLite IRQ line is still unconnected (would need AXI Intc first).
+- Picolibc multilib is `rv32im` not `rv32ima` — close enough for FreeRTOS itself, but application code that calls libc while using atomics may need a local libc rebuild later.
+- Single-hart, single-core; `configNUMBER_OF_CORES = 1` (default). Anything SMP will require multi-hart CLINT.
+- Heap_1 — no `vTaskDelete` or dynamic task teardown. Fine for this demo; switch to heap_4 when tasks start being created/destroyed.
+
+## 2026-04-17 — Stage 5.3 + 5.4: AXI UartLite on FPGA silicon
+
+### What shipped
+- **Port-out refactor** — `soc_top.sv` no longer owns the sim BRAM. It now exposes the AXI4-Lite master signals (`m_axil_*`) as module ports plus an `ext_mei` input for a future AXI Intc. `soc_tb_top.sv` picked up the `axil_bram_slave` instance that was previously inside `soc_top`; `ext_mei` tied 0 in sim. Regression unchanged (71/76 riscv-tests, 7/7 C tests).
+- **`rtl/fpga/axi_hello_top.sv`** — Urbana top that wires the soc AXI master directly to an AMD `axi_uartlite_0` IP at `0xC000_0000`. Kept the same MMCM (100→50 MHz) and PSR-style 2-FF reset synchronizer used by `hello_top`. The UartLite's TX drives A16 (host RX); RX pulls from B16. MMIO exit / legacy console signals stay plumbed to LEDs but the serial pin is UartLite's.
+- **`fpga/scripts/build_axi_hello.tcl`** — non-project Vivado flow: `create_ip axi_uartlite:2.0` configured for 115200 8N1 @ 50 MHz, OOC-synthed, then fed into the top-level synthesis alongside the SoC RTL. Output: `fpga/build/axi_hello/axi_hello.bit`.
+- **`fpga/scripts/prog_axi_hello.tcl`** — clone of `prog_hello.tcl` pointing at the new bitstream.
+- **`fpga/axi_hello/Makefile`** — standard `make mem | synth | prog | clean` pattern, `ELF` pointed at `sw/tests/c/hello_axi.elf`.
+- **`sw/common/uartlite.h`** — polling-mode UartLite helpers (`putc`/`puts`/`getc`/`rx_has`). Register map STAT/CTRL/TX/RX matches pg142.
+- **`sw/tests/c/hello_axi.c`** — prints a banner + `PASS` over UartLite, then `mmio_exit(0)` so the sim harness can grade it. In sim the writes land in the stub BRAM (no observable output) but the MMIO exit still fires — sim PASS is the correctness proof, silicon PASS is the bringup proof.
+- **Top-level Makefile** adds `axi-hello-synth` / `axi-hello-prog` targets.
+
+### Tests
+- **Sim C regression:** 7/7 green including `hello_axi` (exit-based).
+- **Sim riscv-tests:** 71/76 unchanged.
+- **Silicon:** 2026-04-17 10:10 — bitstream programmed over JTAG, CPU drove the AXI UartLite immediately on release-from-reset, 96 bytes captured cleanly on host `/dev/ttyUSB1` @ 115200 8N1:
+
+  ```
+  Hello from RV32IMA over AXI UartLite!
+  sum(1..10) = 55 (expect 55)
+  magic = 0xdeadbeef
+  PASS
+  ```
+
+  Post-route WNS = 0.537 ns at 50 MHz (all 4190 endpoints pass timing). End-to-end path: core dmem → `axi_lite_master` shim → AMD `axi_uartlite_0` → A16 pin → FTDI → `/dev/ttyUSB1`. First real AXI transaction on the platform; confirms the Stage 5.1 shim and Stage 5.2 sim validation correspond to silicon.
+
+### Caveats
+- No AXI crossbar yet — single peripheral (UartLite) on the AXI region; adding Timer and Intc in follow-up once we actually have use for their IRQs.
+- `ext_mei` still tied 0 on silicon because no Intc. UartLite's interrupt output is currently unconnected.
+- Legacy MMIO console (`0xD058_0000`) is still live inside the SoC but not pinned out; useful as an ILA probe point if UART ever goes silent on real hardware.
+
+## 2026-04-16 — Stage 5.1 + 5.2: AXI-Lite master shim, sim-wired
+
+### What shipped
+- **`rtl/soc/axi_lite_master.sv`** — translates the core's native ready/valid dmem slave port into an AXI4-Lite master. 5-state FSM (`IDLE / WRITE / WRITE_B / READ / READ_R`), one outstanding transaction, AW+W accepted in either order via `aw_sent_q / w_sent_q`. Non-OKAY `b_resp` / `r_resp` map to `rsp_fault=1`. No exclusive access; AMOs never reach this path (AXI region is peripherals only).
+- **`rtl/mem/axil_bram_slave.sv`** — sim-only AXI-Lite BRAM (1024 words) for end-to-end shim validation. Accepts AW/W independently, executes byte-strobed writes, 1-cycle AR→R. Not intended for synthesis — FPGA build swaps this out for `axi_bram_ctrl` + a real crossbar.
+- **SoC decode** (`soc_top.sv`) — new region `addr[31:28] == 4'hC` → AXI region @ `0xC000_0000` (256 MiB window, only 4 KiB used in sim). Bad-address path updated to exclude AXI. Master and slave tied together internally for regression.
+
+### Tests
+- **`sw/tests/asm/axi_bram.S`** — writes `0xCAFEBABE` at `0xC0000000`, reads back, stores `0x12345678` at offset 16, reads back, does a byte-strobed `sb` at offset 0 to prove the wstrb plumbing, then emits PASS. Runs in **133 cycles**.
+- **riscv-tests regression:** 71 / 76 unchanged (same five known-OOS failures).
+- **C regression:** 6 / 6 unchanged.
+
+### Caveats
+- Only one AXI region for now; no crossbar. When real peripherals land we'll introduce a small address decoder (UartLite / Timer / Intc / BRAM ctrl slots) between the master and the peripheral set.
+- `m_axil_*prot` tied to 0 — no privilege / secure distinction exercised.
+- The sim BRAM is 4 KiB; the 256 MiB decode window is intentional so FPGA and sim share one memory map, we just populate differently.
+
 ## 2026-04-16 — Stage 4: native CLINT + interrupt delivery
 
 ### What shipped
