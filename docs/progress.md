@@ -2,6 +2,25 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-2 (a+b): SV32 MMU — skeleton, PTW, SRAM-port-B arbiter
+
+### What shipped
+- **Stage 6C-2a — MMU module + interface (`rtl/core/mmu.sv` new, `rtl/soc/soc_top.sv`)**. Instantiates the MMU unconditionally between `core_if/dm_*` and the decoder; when `satp.MODE=0` or effective-priv is M, it's a zero-latency combinational wire. Adds the full if/dm core-facing + downstream request/response channels and a read-only PTW memory port. Also carves `core_if_*` / `core_dm_*` (upstream) vs `if_*` / `dm_*` (downstream) and renames the D-cache's SRAM-port-B signals to `dc_sram_*` so the arbiter below can multiplex with the PTW.
+- **Stage 6C-2b — PTW FSM + permission checks + port-B arbiter (`rtl/core/mmu.sv`, `rtl/soc/soc_top.sv`)**. 2-level SV32 walk (`PTW_IDLE → PTW_L1_REQ → PTW_L1_WAIT → PTW_L0_REQ → PTW_L0_WAIT → PTW_IDLE`) with a per-side walk-result cache (`if_xlate_*`, `dm_xlate_*`) that retires on the downstream rsp handshake. Supports 4 MiB superpages at L1-leaf (fault if `pte.ppn0 != 0`) and 4 KiB pages at L0-leaf. Permission check enforces R/W/X (with MXR), U-bit vs SUM, A (SW-managed, fault if 0), D (SW-managed, fault if 0 on store). Effective priv for dmem = `(priv==M && MPRV) ? MPP : priv`. Invalid encodings (V=0 or W && !R) fault. Port-B arbiter gives PTW priority over the D-cache / direct-dmem path and tracks the in-flight master with `last_was_ptw_q` for 1-cycle rsp routing.
+- **Fix: L1 PTE base shift** — the initial `{satp_i[21:0], 10'd0}` was shifting by 10 instead of 12 (page-size offset), so the walker read PTEs from bogus addresses. Now `{satp_i[21:0], 12'd0}` so L1 base = `satp_ppn << 12`.
+- **MMU smoke test (`sw/tests/asm/mmu_sv32.S`)**. Sets up `root[0x200]` identity superpage for SRAM, `root[0x341]` identity superpage for MMIO, `root[0x204]` → L0 table whose `L0[0]` leaf maps `VA 0x81000000 → PA 0x80001000`. Writes `PATTERN_A` at the PA directly, turns on SV32 with `MPP=S, MPRV=1`, reads it back through the VA (load-through-MMU), writes `PATTERN_B` through the VA (store-through-MMU), disables MPRV, verifies SRAM now holds `PATTERN_B`, prints `PASS\n` and exits 0.
+
+### Tests
+- **MMU smoke test**: PASS on multicycle (26,943 cycles) and pipeline+icache+dcache (41,606 cycles). Exercises both L1 + L0 walk stages, 4 MiB superpage leaf, permission check accept path (R/W/X/A/D + U=0 with eff_priv=S), and walk-result cache retire across multiple accesses.
+- **Sim regression** (`make sim-all` both cores, both with and without caches): **73/76** PASS. Unchanged vs Stage 6C-1 baseline — every ISA test leaves `satp.MODE=0`, so the PTW never fires and bare-mode passthrough is bit-exact.
+- **Sim FreeRTOS**: boots, scheduler runs, `hello #0..3 / [blink 0..1]` prints as expected within 50 M cycles (not run to completion; bare-mode passthrough is unchanged).
+
+### Residuals (deferred)
+- No TLB — every translated access does a fresh 2-level walk. Future Stage 6C-2c will drop a small fully-associative TLB in front of the walker (big win for tight loops over the same page; trivial for MMIO prints which currently re-walk `root[0x341]` per byte).
+- Page faults currently fold into `rsp_fault` (reported as access fault to the core). A later refinement adds a `rsp_pagefault` signal and maps to `INSN/LOAD/STORE_PAGE_FAULT` causes.
+- `SFENCE.VMA` not implemented — required by `rv32mi-p-illegal` (parked). Without a TLB there's nothing to flush yet, so this is a decode-only addition.
+- Ifetch translation tested only indirectly (MPRV exercises dmem). An S-mode ifetch test would need `MRET` to drop privilege.
+
 ## 2026-04-18 — Stage 6C-1 + 6C-3a + Zicntr: S-mode CSRs, delegation, SRET, PMP storage
 
 ### What shipped
