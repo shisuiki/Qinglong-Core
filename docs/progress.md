@@ -2,6 +2,22 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-8: MXR + SUM semantic tests
+
+### What shipped
+- **`sw/tests/asm/mmu_mxr.S`** — verifies mstatus.MXR flips a load's perm check when the leaf has R=0 X=1 (execute-only): with MXR=0 the load pagefaults, with MXR=1 the same VA/TLB entry is live-re-evaluated and the load succeeds. Exercises the "permission is checked on every TLB hit against current CSR state" invariant that's been in the MMU since 6C-2 but was never directly tested.
+- **`sw/tests/asm/mmu_sum.S`** — same structure for mstatus.SUM on a U=1 leaf: S-mode load fails without SUM, succeeds with SUM=1. Confirms the `u_ok = is_fetch ? !p_u : (!p_u || sum)` branch in `perm_ok` — specifically that SUM doesn't leak into the fetch path (not directly tested here, but the asymmetry is in the code review).
+
+### Diagnostic conveniences
+Both tests use distinct `a7` codes on failure paths (0x101–0x103 for main-path checks, 0x201/0x202 for handler-path checks) so a cex immediately pinpoints which invariant blew. Failure codes are stable across cores.
+
+### Gotcha worth remembering
+The MXR test initially failed on both cores because mret clobbers MPP to U per spec. After the handler mrets, the follow-up load translates as U-mode (not S), and S-only pages fail u_ok regardless of MXR/SUM settings. Fix: retry sites re-program MPP=S before the second load. Same pattern in the SUM test.
+
+### Tests
+- **`mmu_mxr.elf`**, **`mmu_sum.elf`**: PASS on both cores.
+- **All prior tests**: PASS. Full regression 74/76 on both cores, unchanged.
+
 ## 2026-04-18 — Stage 6C-7: SFENCE.VMA rs1/rs2 selective flush
 
 ### What shipped
