@@ -157,7 +157,13 @@ module soc_top #(
     );
 `endif
 
-    // ---------- MMU (Stage 6C-2a skeleton: bare passthrough + fault stub) ----------
+    // ---------- PTW memory port (arbitrated onto SRAM port B below) ----------
+    logic        ptw_mem_req_valid, ptw_mem_req_ready;
+    logic [31:0] ptw_mem_req_addr;
+    logic        ptw_mem_rsp_valid, ptw_mem_rsp_fault;
+    logic [31:0] ptw_mem_rsp_rdata;
+
+    // ---------- MMU (Stage 6C-2b: SV32 PTW, no TLB yet) ----------
     mmu u_mmu (
         .clk(clk), .rst(rst),
         .satp_i(mmu_satp_w), .priv_i(mmu_priv_w),
@@ -184,7 +190,12 @@ module soc_top #(
         .dm_ds_req_wmask(dm_req_wmask), .dm_ds_req_size(dm_req_size),
         .dm_ds_req_ready(dm_req_ready),
         .dm_ds_rsp_valid(dm_rsp_valid), .dm_ds_rsp_rdata(dm_rsp_rdata),
-        .dm_ds_rsp_fault(dm_rsp_fault), .dm_ds_rsp_ready(dm_rsp_ready)
+        .dm_ds_rsp_fault(dm_rsp_fault), .dm_ds_rsp_ready(dm_rsp_ready),
+
+        .ptw_req_valid(ptw_mem_req_valid), .ptw_req_addr(ptw_mem_req_addr),
+        .ptw_req_ready(ptw_mem_req_ready),
+        .ptw_rsp_valid(ptw_mem_rsp_valid), .ptw_rsp_rdata(ptw_mem_rsp_rdata),
+        .ptw_rsp_fault(ptw_mem_rsp_fault)
     );
 
     // ---------- dmem address decode ----------
@@ -287,7 +298,16 @@ module soc_top #(
     // ---------- D-cache (optional, between DMEM SRAM region and port B) ----------
     //
     // Enabled with `define USE_DCACHE. Only the SRAM region goes through the
-    // cache; MMIO / CLINT / AXI remain uncached bypass paths.
+    // cache; MMIO / CLINT / AXI remain uncached bypass paths. The D-cache
+    // (or the direct SRAM passthrough) now shares SRAM port B with the MMU's
+    // PTW through a priority arbiter defined below.
+    logic        dc_sram_req_valid, dc_sram_req_ready;
+    logic [31:0] dc_sram_req_addr, dc_sram_req_wdata;
+    logic        dc_sram_req_wen;
+    logic [3:0]  dc_sram_req_wmask;
+    logic        dc_sram_rsp_valid;
+    logic [31:0] dc_sram_rsp_rdata;
+
 `ifdef USE_DCACHE
     dcache #(
         .LINE_BYTES(64), .SETS(64), .WAYS(4)
@@ -300,22 +320,53 @@ module soc_top #(
         .core_rsp_valid(dm_sram_rsp_valid), .core_rsp_rdata(dm_sram_rsp_rdata),
         .core_rsp_fault(dm_sram_rsp_fault),
 
-        .mem_req_valid(sram_b_req_valid), .mem_req_addr(sram_b_req_addr),
-        .mem_req_wen(sram_b_req_wen),     .mem_req_wmask(sram_b_req_wmask),
-        .mem_req_wdata(sram_b_req_wdata), .mem_req_ready(sram_b_req_ready),
-        .mem_rsp_valid(sram_b_rsp_valid), .mem_rsp_rdata(sram_b_rsp_rdata)
+        .mem_req_valid(dc_sram_req_valid), .mem_req_addr(dc_sram_req_addr),
+        .mem_req_wen(dc_sram_req_wen),     .mem_req_wmask(dc_sram_req_wmask),
+        .mem_req_wdata(dc_sram_req_wdata), .mem_req_ready(dc_sram_req_ready),
+        .mem_rsp_valid(dc_sram_rsp_valid), .mem_rsp_rdata(dc_sram_rsp_rdata)
     );
 `else
-    assign sram_b_req_valid  = dm_sram_req_valid;
-    assign sram_b_req_addr   = dm_sram_req_addr;
-    assign sram_b_req_wen    = dm_sram_req_wen;
-    assign sram_b_req_wmask  = dm_sram_req_wmask;
-    assign sram_b_req_wdata  = dm_sram_req_wdata;
-    assign dm_sram_req_ready = sram_b_req_ready;
-    assign dm_sram_rsp_valid = sram_b_rsp_valid;
-    assign dm_sram_rsp_rdata = sram_b_rsp_rdata;
+    assign dc_sram_req_valid = dm_sram_req_valid;
+    assign dc_sram_req_addr  = dm_sram_req_addr;
+    assign dc_sram_req_wen   = dm_sram_req_wen;
+    assign dc_sram_req_wmask = dm_sram_req_wmask;
+    assign dc_sram_req_wdata = dm_sram_req_wdata;
+    assign dm_sram_req_ready = dc_sram_req_ready;
+    assign dm_sram_rsp_valid = dc_sram_rsp_valid;
+    assign dm_sram_rsp_rdata = dc_sram_rsp_rdata;
     assign dm_sram_rsp_fault = 1'b0;
 `endif
+
+    // ---------- SRAM port B arbiter: PTW (priority) vs D-cache / dmem_sram ----------
+    // PTW accesses are single-beat reads; both masters are single-outstanding
+    // with a 1-cycle rsp from sram_dp. The mux picks PTW whenever it asserts;
+    // D-cache's req_ready drops during that cycle. The req→rsp pipeline is
+    // tracked with `last_was_ptw_q` so rsp_valid routes back to the correct
+    // master the next cycle.
+    wire arb_pick_ptw = ptw_mem_req_valid;
+
+    assign sram_b_req_valid  = arb_pick_ptw ? ptw_mem_req_valid : dc_sram_req_valid;
+    assign sram_b_req_addr   = arb_pick_ptw ? ptw_mem_req_addr  : dc_sram_req_addr;
+    assign sram_b_req_wen    = arb_pick_ptw ? 1'b0              : dc_sram_req_wen;
+    assign sram_b_req_wmask  = arb_pick_ptw ? 4'b1111           : dc_sram_req_wmask;
+    assign sram_b_req_wdata  = arb_pick_ptw ? 32'd0             : dc_sram_req_wdata;
+
+    assign ptw_mem_req_ready = sram_b_req_ready;
+    assign dc_sram_req_ready = arb_pick_ptw ? 1'b0 : sram_b_req_ready;
+
+    logic last_was_ptw_q;
+    always_ff @(posedge clk) begin
+        if (rst)
+            last_was_ptw_q <= 1'b0;
+        else if (sram_b_req_valid && sram_b_req_ready)
+            last_was_ptw_q <= arb_pick_ptw;
+    end
+
+    assign ptw_mem_rsp_valid = sram_b_rsp_valid &&  last_was_ptw_q;
+    assign ptw_mem_rsp_rdata = sram_b_rsp_rdata;
+    assign ptw_mem_rsp_fault = 1'b0;
+    assign dc_sram_rsp_valid = sram_b_rsp_valid && !last_was_ptw_q;
+    assign dc_sram_rsp_rdata = sram_b_rsp_rdata;
 
     // ---------- I-cache (optional, between core IF and SRAM port A) ----------
     //
