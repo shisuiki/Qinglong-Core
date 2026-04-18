@@ -1,3 +1,6 @@
 [submodule "third_party/FreeRTOS-Kernel"]
 	path = third_party/FreeRTOS-Kernel
 	url = https://github.com/FreeRTOS/FreeRTOS-Kernel.git
+[submodule "third_party/riscv-formal"]
+	path = third_party/riscv-formal
+	url = https://github.com/YosysHQ/riscv-formal.git
