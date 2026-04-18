@@ -29,6 +29,7 @@ set src_list [list \
     [file join $repo_dir rtl core div_unit.sv]        \
     [file join $repo_dir rtl core core_multicycle.sv] \
     [file join $repo_dir rtl core core_pipeline.sv]   \
+    [file join $repo_dir rtl core mmu.sv]             \
     [file join $repo_dir rtl mem   sram_dp.sv]         \
     [file join $repo_dir rtl cache icache.sv]          \
     [file join $repo_dir rtl cache dcache.sv]          \

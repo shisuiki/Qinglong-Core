@@ -62,7 +62,21 @@ module soc_top #(
     output logic [31:0] commit_cause
 );
 
-    // ---------- core ↔ bus ----------
+    // ---------- core ↔ MMU (pre-translation) ----------
+    logic        core_if_req_valid, core_if_req_ready;
+    logic [31:0] core_if_req_addr;
+    logic        core_if_rsp_valid, core_if_rsp_fault, core_if_rsp_ready;
+    logic [31:0] core_if_rsp_data;
+
+    logic        core_dm_req_valid, core_dm_req_ready;
+    logic [31:0] core_dm_req_addr, core_dm_req_wdata;
+    logic        core_dm_req_wen;
+    logic [3:0]  core_dm_req_wmask;
+    logic [1:0]  core_dm_req_size;
+    logic        core_dm_rsp_valid, core_dm_rsp_fault, core_dm_rsp_ready;
+    logic [31:0] core_dm_rsp_rdata;
+
+    // ---------- MMU ↔ bus (post-translation, physical addresses) ----------
     logic        if_req_valid, if_req_ready;
     logic [31:0] if_req_addr;
     logic        if_rsp_valid, if_rsp_fault, if_rsp_ready;
@@ -75,6 +89,11 @@ module soc_top #(
     logic [1:0]  dm_req_size;
     logic        dm_rsp_valid, dm_rsp_fault, dm_rsp_ready;
     logic [31:0] dm_rsp_rdata;
+
+    // ---------- CSR state for the MMU ----------
+    logic [31:0] mmu_satp_w;
+    logic [1:0]  mmu_priv_w, mmu_mpp_w;
+    logic        mmu_mprv_w, mmu_sum_w, mmu_mxr_w;
 
     // ---------- interrupt inputs from CLINT ----------
     logic clint_mti, clint_msi;
@@ -89,15 +108,15 @@ module soc_top #(
     core_pipeline #(.RESET_PC(RESET_PC)) u_core (
         .clk(clk), .rst(rst),
 
-        .ifetch_req_valid(if_req_valid), .ifetch_req_addr(if_req_addr), .ifetch_req_ready(if_req_ready),
-        .ifetch_rsp_valid(if_rsp_valid), .ifetch_rsp_data(if_rsp_data), .ifetch_rsp_fault(if_rsp_fault),
-        .ifetch_rsp_ready(if_rsp_ready),
+        .ifetch_req_valid(core_if_req_valid), .ifetch_req_addr(core_if_req_addr), .ifetch_req_ready(core_if_req_ready),
+        .ifetch_rsp_valid(core_if_rsp_valid), .ifetch_rsp_data(core_if_rsp_data), .ifetch_rsp_fault(core_if_rsp_fault),
+        .ifetch_rsp_ready(core_if_rsp_ready),
 
-        .dmem_req_valid(dm_req_valid), .dmem_req_addr(dm_req_addr), .dmem_req_wen(dm_req_wen),
-        .dmem_req_wdata(dm_req_wdata), .dmem_req_wmask(dm_req_wmask), .dmem_req_size(dm_req_size),
-        .dmem_req_ready(dm_req_ready),
-        .dmem_rsp_valid(dm_rsp_valid), .dmem_rsp_rdata(dm_rsp_rdata), .dmem_rsp_fault(dm_rsp_fault),
-        .dmem_rsp_ready(dm_rsp_ready),
+        .dmem_req_valid(core_dm_req_valid), .dmem_req_addr(core_dm_req_addr), .dmem_req_wen(core_dm_req_wen),
+        .dmem_req_wdata(core_dm_req_wdata), .dmem_req_wmask(core_dm_req_wmask), .dmem_req_size(core_dm_req_size),
+        .dmem_req_ready(core_dm_req_ready),
+        .dmem_rsp_valid(core_dm_rsp_valid), .dmem_rsp_rdata(core_dm_rsp_rdata), .dmem_rsp_fault(core_dm_rsp_fault),
+        .dmem_rsp_ready(core_dm_rsp_ready),
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
 
@@ -105,30 +124,68 @@ module soc_top #(
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
         .commit_trap(commit_trap), .commit_cause(commit_cause),
 
-        .icache_invalidate(icache_invalidate_w)
+        .icache_invalidate(icache_invalidate_w),
+
+        .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
+        .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
+        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w)
     );
 `else
     assign icache_invalidate_w = 1'b0;
     core_multicycle #(.RESET_PC(RESET_PC)) u_core (
         .clk(clk), .rst(rst),
 
-        .ifetch_req_valid(if_req_valid), .ifetch_req_addr(if_req_addr), .ifetch_req_ready(if_req_ready),
-        .ifetch_rsp_valid(if_rsp_valid), .ifetch_rsp_data(if_rsp_data), .ifetch_rsp_fault(if_rsp_fault),
-        .ifetch_rsp_ready(if_rsp_ready),
+        .ifetch_req_valid(core_if_req_valid), .ifetch_req_addr(core_if_req_addr), .ifetch_req_ready(core_if_req_ready),
+        .ifetch_rsp_valid(core_if_rsp_valid), .ifetch_rsp_data(core_if_rsp_data), .ifetch_rsp_fault(core_if_rsp_fault),
+        .ifetch_rsp_ready(core_if_rsp_ready),
 
-        .dmem_req_valid(dm_req_valid), .dmem_req_addr(dm_req_addr), .dmem_req_wen(dm_req_wen),
-        .dmem_req_wdata(dm_req_wdata), .dmem_req_wmask(dm_req_wmask), .dmem_req_size(dm_req_size),
-        .dmem_req_ready(dm_req_ready),
-        .dmem_rsp_valid(dm_rsp_valid), .dmem_rsp_rdata(dm_rsp_rdata), .dmem_rsp_fault(dm_rsp_fault),
-        .dmem_rsp_ready(dm_rsp_ready),
+        .dmem_req_valid(core_dm_req_valid), .dmem_req_addr(core_dm_req_addr), .dmem_req_wen(core_dm_req_wen),
+        .dmem_req_wdata(core_dm_req_wdata), .dmem_req_wmask(core_dm_req_wmask), .dmem_req_size(core_dm_req_size),
+        .dmem_req_ready(core_dm_req_ready),
+        .dmem_rsp_valid(core_dm_rsp_valid), .dmem_rsp_rdata(core_dm_rsp_rdata), .dmem_rsp_fault(core_dm_rsp_fault),
+        .dmem_rsp_ready(core_dm_rsp_ready),
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
-        .commit_trap(commit_trap), .commit_cause(commit_cause)
+        .commit_trap(commit_trap), .commit_cause(commit_cause),
+
+        .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
+        .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
+        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w)
     );
 `endif
+
+    // ---------- MMU (Stage 6C-2a skeleton: bare passthrough + fault stub) ----------
+    mmu u_mmu (
+        .clk(clk), .rst(rst),
+        .satp_i(mmu_satp_w), .priv_i(mmu_priv_w),
+        .mprv_i(mmu_mprv_w), .mpp_i(mmu_mpp_w),
+        .sum_i(mmu_sum_w),   .mxr_i(mmu_mxr_w),
+
+        .if_core_req_valid(core_if_req_valid), .if_core_req_addr(core_if_req_addr), .if_core_req_ready(core_if_req_ready),
+        .if_core_rsp_valid(core_if_rsp_valid), .if_core_rsp_data(core_if_rsp_data), .if_core_rsp_fault(core_if_rsp_fault),
+        .if_core_rsp_ready(core_if_rsp_ready),
+
+        .if_ds_req_valid(if_req_valid), .if_ds_req_addr(if_req_addr), .if_ds_req_ready(if_req_ready),
+        .if_ds_rsp_valid(if_rsp_valid), .if_ds_rsp_data(if_rsp_data), .if_ds_rsp_fault(if_rsp_fault),
+        .if_ds_rsp_ready(if_rsp_ready),
+
+        .dm_core_req_valid(core_dm_req_valid), .dm_core_req_addr(core_dm_req_addr),
+        .dm_core_req_wen(core_dm_req_wen),     .dm_core_req_wdata(core_dm_req_wdata),
+        .dm_core_req_wmask(core_dm_req_wmask), .dm_core_req_size(core_dm_req_size),
+        .dm_core_req_ready(core_dm_req_ready),
+        .dm_core_rsp_valid(core_dm_rsp_valid), .dm_core_rsp_rdata(core_dm_rsp_rdata),
+        .dm_core_rsp_fault(core_dm_rsp_fault), .dm_core_rsp_ready(core_dm_rsp_ready),
+
+        .dm_ds_req_valid(dm_req_valid), .dm_ds_req_addr(dm_req_addr),
+        .dm_ds_req_wen(dm_req_wen),     .dm_ds_req_wdata(dm_req_wdata),
+        .dm_ds_req_wmask(dm_req_wmask), .dm_ds_req_size(dm_req_size),
+        .dm_ds_req_ready(dm_req_ready),
+        .dm_ds_rsp_valid(dm_rsp_valid), .dm_ds_rsp_rdata(dm_rsp_rdata),
+        .dm_ds_rsp_fault(dm_rsp_fault), .dm_ds_rsp_ready(dm_rsp_ready)
+    );
 
     // ---------- dmem address decode ----------
     // CLINT: addr[31:20] == 12'h020 → 1 MiB @ 0x0200_0000

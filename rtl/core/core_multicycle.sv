@@ -58,7 +58,15 @@ module core_multicycle #(
     output logic [4:0]  commit_rd_addr,
     output logic [31:0] commit_rd_data,
     output logic        commit_trap,
-    output logic [31:0] commit_cause
+    output logic [31:0] commit_cause,
+
+    // ---- CSR state visible to the MMU (Stage 6C-2) ----
+    output logic [31:0] mmu_satp,
+    output logic [1:0]  mmu_priv,
+    output logic        mmu_mprv,
+    output logic [1:0]  mmu_mpp,
+    output logic        mmu_sum,
+    output logic        mmu_mxr
 );
 
     // =========================================================================
@@ -191,6 +199,13 @@ module core_multicycle #(
         .mstatus_mpp(mstatus_mpp_v),
         .irq_pending(irq_pending_v), .irq_cause(irq_cause_v)
     );
+
+    assign mmu_satp = satp_v;
+    assign mmu_priv = priv_mode_v;
+    assign mmu_mprv = mstatus_mprv_v;
+    assign mmu_mpp  = mstatus_mpp_v;
+    assign mmu_sum  = sstatus_sum_v;
+    assign mmu_mxr  = mstatus_mxr_v;
 
     // M-extension: combinational multiplier (1 EX cycle) + iterative divider (32 cycles).
     // MUL   : a_signed=0, b_signed=0, hi=0 (low 32)

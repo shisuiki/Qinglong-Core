@@ -72,11 +72,26 @@ module core_pipeline #(
     output logic [31:0] commit_cause,
 
     // ---- icache invalidate on FENCE.I (1-cycle pulse at retirement) ----
-    output logic        icache_invalidate
+    output logic        icache_invalidate,
+
+    // ---- CSR state visible to the MMU (Stage 6C-2) ----
+    output logic [31:0] mmu_satp,
+    output logic [1:0]  mmu_priv,
+    output logic        mmu_mprv,
+    output logic [1:0]  mmu_mpp,
+    output logic        mmu_sum,
+    output logic        mmu_mxr
 `ifdef RISCV_FORMAL
     ,`RVFI_OUTPUTS
 `endif
 );
+
+    assign mmu_satp = satp_v;
+    assign mmu_priv = priv_mode_v;
+    assign mmu_mprv = mstatus_mprv_v;
+    assign mmu_mpp  = mstatus_mpp_v;
+    assign mmu_sum  = sstatus_sum_v;
+    assign mmu_mxr  = mstatus_mxr_v;
 
     // ========================================================================
     // Signal declarations (all at top for clarity)
