@@ -236,6 +236,7 @@ module core_pipeline #(
     logic [1:0]  priv_mode_v, mstatus_mpp_v;
     logic        trap_to_s_v;
     logic        sstatus_sum_v, mstatus_mxr_v, mstatus_mprv_v;
+    logic        mstatus_tvm_v, mstatus_tsr_v;
     logic        irq_pending_v;
     logic [31:0] irq_cause_v;
 
@@ -461,13 +462,21 @@ module core_pipeline #(
         if (id_is_system && (id_funct3 == `F3_PRIV)) begin
             if (id_is_sfence) begin
                 // SFENCE.VMA rs1, rs2 — rs1/rs2 are operands, rd must be 0.
+                // Illegal from U-mode; also illegal from S-mode when TVM=1.
                 if (id_rd != 5'd0) id_illegal = 1'b1;
+                if (priv_mode_v == `PRV_U) id_illegal = 1'b1;
+                if (priv_mode_v == `PRV_S && mstatus_tvm_v) id_illegal = 1'b1;
             end else begin
                 unique case (id_instr_q[31:20])
                     12'h000, 12'h001, 12'h302, 12'h102, 12'h105: /* ok */ ;
                     default: id_illegal = 1'b1;
                 endcase
                 if (id_rd != 5'd0 || id_rs1 != 5'd0) id_illegal = 1'b1;
+                // SRET illegal from U always; illegal from S when TSR=1.
+                if (id_is_sret && priv_mode_v == `PRV_U) id_illegal = 1'b1;
+                if (id_is_sret && priv_mode_v == `PRV_S && mstatus_tsr_v) id_illegal = 1'b1;
+                // MRET requires M-mode.
+                if (id_is_mret && priv_mode_v != `PRV_M) id_illegal = 1'b1;
             end
         end
         // CSR illegal: writing a read-only CSR (addr[11:10]==11 and op is W/S/C with nonzero src)
@@ -499,6 +508,10 @@ module core_pipeline #(
                     /* ok */ ;
                 default: id_illegal = 1'b1;
             endcase
+            // satp access from S-mode with TVM=1 is illegal, regardless of op.
+            if (id_csr_addr == `CSR_SATP &&
+                priv_mode_v == `PRV_S && mstatus_tvm_v)
+                id_illegal = 1'b1;
         end
     end
 
@@ -1286,6 +1299,8 @@ module core_pipeline #(
         .mstatus_mxr(mstatus_mxr_v),
         .mstatus_mprv(mstatus_mprv_v),
         .mstatus_mpp(mstatus_mpp_v),
+        .mstatus_tvm(mstatus_tvm_v),
+        .mstatus_tsr(mstatus_tsr_v),
         .irq_pending(irq_pending_v),
         .irq_cause(irq_cause_v)
     );

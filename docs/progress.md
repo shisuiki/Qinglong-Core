@@ -2,6 +2,29 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-4: TVM/TSR enforcement + interrupt-priority fix
+
+### What shipped
+- **mstatus.TVM / mstatus.TSR now storage-live (`rtl/core/csr.sv`)**. The writable mask extends from `0x000E_19AA` to `0x005E_19AA` (adds bits 20 / 22). Two new CSR-module outputs, `mstatus_tvm` / `mstatus_tsr`, feed the cores.
+- **Illegal-decode gating in pipeline ID (`rtl/core/core_pipeline.sv`)**. Three new gates:
+  - `SFENCE.VMA` illegal in U-mode, and from S-mode when TVM=1.
+  - `SRET` illegal in U-mode, and from S-mode when TSR=1.
+  - `MRET` illegal outside M-mode (was previously accepted anywhere).
+  - `satp` (CSR 0x180) access illegal from S-mode when TVM=1 — applied regardless of read/write op.
+- **Interrupt-cause priority fix (`rtl/core/csr.sv`)**. The `irq_cause` always_comb used a three-way if/else (MEI / MSI / else→MTI) that returned the MTI cause for *any* pending bit outside {MEI, MSI}. Now the priority chain extends through MTI → SEI → SSI → STI per the priv-spec ordering. Caught while debugging `rv32mi-p-illegal` — the test pends SSIP but was seeing MTI as the cause.
+
+### Tests
+- **`rv32mi-p-illegal`**: PASS on pipeline (1,139 cycles). Previously TIMEOUT for two reasons — the interrupt-cause bug picked MTI instead of SSI, and SFENCE.VMA / SRET / satp didn't honour TVM/TSR. Both fixed here.
+- **Sim regression (pipeline, with and without caches)**: **74/76** — up from 73. Remaining failures are `ma_data` (misaligned-address) and `breakpoint` (debug spec support), both known-deferred.
+- **Sim regression (multicycle)**: stays at 73/76. Multicycle doesn't decode SRET, so `rv32mi-p-illegal` is not reachable there; not pursued.
+- **Sim C regression** (`make sim-c CORE=pipeline ICACHE=1 DCACHE=1`): 7/7 PASS.
+- **MMU tests**: smoke + pagefault still PASS on both cores.
+- **Sim FreeRTOS**: boots, `hello` / `blink` tasks run.
+
+### Residuals (deferred)
+- Multicycle: SRET decode would close the last 73→74 gap but adds MRET-like pipeline plumbing for a core that stays M-mode in practice; not currently worth it.
+- SFENCE.VMA still flushes the whole TLB regardless of rs1 / rs2 (no ASID, no per-VPN).
+
 ## 2026-04-18 — Stage 6C-2d: page-fault cause distinction
 
 ### What shipped

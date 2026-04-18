@@ -58,6 +58,8 @@ module csr (
     output logic        mstatus_mxr,   // make-executable-readable (for MMU)
     output logic        mstatus_mprv,  // load/store uses MPP's priv (for MMU)
     output logic [1:0]  mstatus_mpp,
+    output logic        mstatus_tvm,   // trap SFENCE.VMA / satp from S-mode
+    output logic        mstatus_tsr,   // trap SRET from S-mode
 
     // combinational interrupt-take decision and cause (priority MEI > MSI > MTI)
     output logic        irq_pending,   // asserted while an M-mode interrupt can be taken
@@ -108,6 +110,8 @@ module csr (
     assign mstatus_mxr  = mstatus_q[`MSTATUS_MXR_BIT];
     assign mstatus_mprv = mstatus_q[`MSTATUS_MPRV_BIT];
     assign mstatus_mpp  = mstatus_q[`MSTATUS_MPP_HI:`MSTATUS_MPP_LO];
+    assign mstatus_tvm  = mstatus_q[`MSTATUS_TVM_BIT];
+    assign mstatus_tsr  = mstatus_q[`MSTATUS_TSR_BIT];
 
     // ------------- mip composition -------------
     // External bits (MSIP/MTIP/MEIP) come from the interrupt controllers.
@@ -129,10 +133,14 @@ module csr (
     wire m_irq_enabled = (priv_mode_q != `PRV_M) ||
                           (priv_mode_q == `PRV_M && mstatus_q[`MSTATUS_MIE_BIT]);
     assign irq_pending = m_irq_enabled && (mip_enabled != 32'd0);
+    // RISC-V priv spec priority: MEI > MSI > MTI > SEI > SSI > STI.
     always_comb begin
         if      (mip_enabled[`MIP_MEI_BIT]) irq_cause = `CAUSE_IRQ_MEI;
         else if (mip_enabled[`MIP_MSI_BIT]) irq_cause = `CAUSE_IRQ_MSI;
-        else                                irq_cause = `CAUSE_IRQ_MTI;
+        else if (mip_enabled[`MIP_MTI_BIT]) irq_cause = `CAUSE_IRQ_MTI;
+        else if (mip_enabled[`MIP_SEI_BIT]) irq_cause = `CAUSE_IRQ_SEI;
+        else if (mip_enabled[`MIP_SSI_BIT]) irq_cause = `CAUSE_IRQ_SSI;
+        else                                irq_cause = `CAUSE_IRQ_STI;
     end
 
     // ------------- sstatus / sie / sip views -------------
@@ -255,8 +263,8 @@ module csr (
 
     // Writable bit masks.
     // mstatus: MIE(3) MPIE(7) MPP(12:11) | SIE(1) SPIE(5) SPP(8) | SUM(18)
-    //          MXR(19) MPRV(17). Leaves TVM/TW/TSR and SD read-only zero.
-    localparam logic [31:0] MSTATUS_WRITABLE = 32'h000E_19AA;
+    //          MXR(19) MPRV(17) | TVM(20) TSR(22). TW(21) and SD stay read-only zero.
+    localparam logic [31:0] MSTATUS_WRITABLE = 32'h005E_19AA;
     // SSTATUS_MASK (see defs.svh) — subset of MSTATUS_WRITABLE.
     // mie / mip writable bit masks. mip: only SSIP is writable (software
     // interrupt pending at S-level).

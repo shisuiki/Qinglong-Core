@@ -180,6 +180,7 @@ module core_multicycle #(
     logic [31:0] stvec_v, sepc_v, satp_v;
     logic [1:0]  priv_mode_v, mstatus_mpp_v;
     logic        trap_to_s_v, sstatus_sum_v, mstatus_mxr_v, mstatus_mprv_v;
+    logic        mstatus_tvm_v, mstatus_tsr_v;
     logic        irq_pending_v;
     logic [31:0] irq_cause_v;
     // Multicycle core stays M-only; SRET is not decoded here. The unused
@@ -203,6 +204,8 @@ module core_multicycle #(
         .mstatus_mxr(mstatus_mxr_v),
         .mstatus_mprv(mstatus_mprv_v),
         .mstatus_mpp(mstatus_mpp_v),
+        .mstatus_tvm(mstatus_tvm_v),
+        .mstatus_tsr(mstatus_tsr_v),
         .irq_pending(irq_pending_v), .irq_cause(irq_cause_v)
     );
 
