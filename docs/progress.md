@@ -2,6 +2,31 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6A: Instruction cache (4-way, 64 B lines, 16 KiB)
+
+### What shipped
+- **`rtl/cache/icache.sv`** — 4-way set-associative I-cache, 64 B lines, 16 KiB. Interposes on the core's `ifetch_*` bus (same valid/ready shape on both sides, single outstanding). Synchronous BRAM reads (1-cycle hit); miss fills a full line via 16 back-to-back single-word mem requests. Tree-pLRU replacement (3 bits/set for 4-way). Explicit `fill_target_q` bypass register captures the target word as it streams in to sidestep a same-cycle read-after-write race when `saved_woff == LAST`. Per-set valid bits live in FFs (resettable) so `rst` gives a clean miss everywhere without BRAM init.
+- **FENCE.I support in `rtl/core/core_pipeline.sv`** — WB-level decode from `wb_instr_q` (no new pipeline flag propagation); `icache_invalidate` is a single-cycle pulse; `wb_redirect` now fires on FENCE.I to refetch from `pc+4`. `rtl/cache/icache.sv` drops `core_req_ready` while `invalidate` is high and clears all `valid_bits[]` in one cycle.
+- **`rtl/soc/soc_top.sv`** — `ifdef USE_ICACHE` drops the icache between the core IF port and SRAM port A; `else` branch is a direct passthrough, so the SoC synthesises unchanged when the icache is off. `icache_invalidate_w` is wired from `core_pipeline` when the pipeline core is selected, tied to `0` under the multicycle core (which has no outstanding-fetch state and doesn't need it).
+- **`sim/Makefile`** — `ICACHE=1` flips `-DUSE_ICACHE`; default keeps the passthrough so the baseline suite stays stable.
+
+### Tests (all PASS)
+- **Sim regression** (`make sim-all CORE=pipeline ICACHE=1`): 71/76 riscv-tests PASS — identical result to the cache-less baseline. `rv32ui-p-fence_i` passes (the self-modifying-code test broke without FENCE.I handling; that's what drove adding it). Same 5 pre-existing out-of-scope failures.
+- **Sim C regression** (`make sim-c CORE=pipeline ICACHE=1`): 7/7 PASS.
+- **Sim FreeRTOS** (`make run CORE=pipeline ICACHE=1 TEST=sw/freertos/freertos_demo.elf`): `PASS` + `MMIO exit 0` at cycle 112,568,262 (within 0.02 % of the 112.55 M cache-less baseline — on the `freertos_demo` workload IF traffic is dwarfed by the tick-heavy scheduler path, so the icache doesn't buy much here; still worth having for silicon where BRAM-side latency would dominate without it).
+- **Formal** (re-ran the full suite after the `core_pipeline.sv` FENCE.I edits): 40/40 PASS including `reg_ch0` at depth 20 (637 s). No regression from the WB-level FENCE.I decode.
+
+### Design notes
+- **Why WB-level FENCE.I detection instead of a pipeline bit**: `wb_instr_q` already carries the full instruction word to WB, and FENCE.I is rare enough that decoding once at WB beats plumbing a single-use flag through ID/EX/MEM. `wb_redirect` already handles traps/MRET via the same combinational path, so extending it was a three-line change.
+- **Why the `fill_target_q` bypass**: during line-fill, the last word we write may be the target word. A naïve design reads `data_ram` synchronously on the same cycle, which races the write — some tools serialise it write-first, others read-first. `fill_target_q` captures the target word as it arrives from memory, unambiguously independent of BRAM read-port timing.
+- **Why per-set valid bits in FFs, not tag-valid in BRAM**: saves a BRAM-side reset path and makes `invalidate` a one-cycle all-ways reset. Cost is 64 FFs per `SETS=64` — trivial.
+- **No FENCE.I on the multicycle core**: it issues one ifetch and stalls to retirement, so the icache always sees a completed transaction before the next fetch. The invalidate wire is tied off; the icache still supports invalidate but the path is unused.
+
+### Caveats / next
+- Icache is read-only. No coherence against D-side stores — correct for von-Neumann-separated SRAMs, but once the D-cache lands with a store buffer, stores into code space need to either invalidate the I-cache or require SW FENCE.I (riscv-privileged says the latter). Plan is SW FENCE.I.
+- No ITLB/VIPT yet — physical-address tagged. MMU (Stage 6C) will either add ITLB in front or widen tags to include ASID; TBD.
+- Next up: **Stage 6B — D-cache** (write-back, write-allocate, store buffer per `riscv_soc_plan.md`).
+
 ## 2026-04-18 — Formal verification (riscv-formal, RV32I)
 
 ### What shipped

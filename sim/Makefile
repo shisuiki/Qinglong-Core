@@ -24,6 +24,7 @@ RTL_FILES := \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/mem/axil_bram_slave.sv \
     $(RTL_DIR)/mem/axil_uartlite_sim.sv \
+    $(RTL_DIR)/cache/icache.sv \
     $(RTL_DIR)/soc/mmio.sv \
     $(RTL_DIR)/soc/clint.sv \
     $(RTL_DIR)/soc/axi_lite_master.sv \
@@ -58,6 +59,10 @@ CORE    ?=
 
 ifeq ($(CORE),pipeline)
 VERILATOR_FLAGS += -DUSE_PIPELINE_CORE
+endif
+# ICACHE=1 inserts the I-cache between the core IF port and SRAM port A.
+ifeq ($(ICACHE),1)
+VERILATOR_FLAGS += -DUSE_ICACHE
 endif
 ifneq ($(DEBUG_PIPE),)
 VERILATOR_FLAGS += -DDEBUG_PIPE

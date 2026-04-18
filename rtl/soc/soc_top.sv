@@ -79,11 +79,35 @@ module soc_top #(
     // ---------- interrupt inputs from CLINT ----------
     logic clint_mti, clint_msi;
 
+    // FENCE.I → icache invalidate pulse. Only the pipeline core emits it; the
+    // multicycle core doesn't pair with the icache in supported configs.
+    logic icache_invalidate_w;
+
 `ifdef USE_PIPELINE_CORE
     core_pipeline #(.RESET_PC(RESET_PC)) u_core (
+        .clk(clk), .rst(rst),
+
+        .ifetch_req_valid(if_req_valid), .ifetch_req_addr(if_req_addr), .ifetch_req_ready(if_req_ready),
+        .ifetch_rsp_valid(if_rsp_valid), .ifetch_rsp_data(if_rsp_data), .ifetch_rsp_fault(if_rsp_fault),
+        .ifetch_rsp_ready(if_rsp_ready),
+
+        .dmem_req_valid(dm_req_valid), .dmem_req_addr(dm_req_addr), .dmem_req_wen(dm_req_wen),
+        .dmem_req_wdata(dm_req_wdata), .dmem_req_wmask(dm_req_wmask), .dmem_req_size(dm_req_size),
+        .dmem_req_ready(dm_req_ready),
+        .dmem_rsp_valid(dm_rsp_valid), .dmem_rsp_rdata(dm_rsp_rdata), .dmem_rsp_fault(dm_rsp_fault),
+        .dmem_rsp_ready(dm_rsp_ready),
+
+        .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
+
+        .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
+        .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
+        .commit_trap(commit_trap), .commit_cause(commit_cause),
+
+        .icache_invalidate(icache_invalidate_w)
+    );
 `else
+    assign icache_invalidate_w = 1'b0;
     core_multicycle #(.RESET_PC(RESET_PC)) u_core (
-`endif
         .clk(clk), .rst(rst),
 
         .ifetch_req_valid(if_req_valid), .ifetch_req_addr(if_req_addr), .ifetch_req_ready(if_req_ready),
@@ -102,6 +126,7 @@ module soc_top #(
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
         .commit_trap(commit_trap), .commit_cause(commit_cause)
     );
+`endif
 
     // ---------- dmem address decode ----------
     // CLINT: addr[31:20] == 12'h020 → 1 MiB @ 0x0200_0000
@@ -187,23 +212,56 @@ module soc_top #(
         else     dmem_bad_rsp_valid <= dm_req_valid && !dm_is_sram && !dm_is_mmio && !dm_is_clint && !dm_is_axi;
     end
 
+    // ---------- I-cache (optional, between core IF and SRAM port A) ----------
+    //
+    // Enabled with `define USE_ICACHE. Drops in at the ifetch path only; the
+    // core-facing side uses the same valid/ready protocol that previously
+    // wired direct-to-SRAM, so this is transparent to the core.
+    logic        sram_a_req_valid, sram_a_req_ready;
+    logic [31:0] sram_a_req_addr;
+    logic        sram_a_rsp_valid;
+    logic [31:0] sram_a_rsp_rdata;
+
+`ifdef USE_ICACHE
+    icache #(
+        .LINE_BYTES(64), .SETS(64), .WAYS(4)
+    ) u_icache (
+        .clk(clk), .rst(rst),
+
+        .core_req_valid(if_req_valid), .core_req_addr(if_req_addr),
+        .core_req_ready(if_req_ready),
+        .core_rsp_valid(if_rsp_valid), .core_rsp_data(if_rsp_data),
+        .core_rsp_fault(if_rsp_fault), .core_rsp_ready(if_rsp_ready),
+
+        .mem_req_valid(sram_a_req_valid), .mem_req_addr(sram_a_req_addr),
+        .mem_req_ready(sram_a_req_ready),
+        .mem_rsp_valid(sram_a_rsp_valid), .mem_rsp_data(sram_a_rsp_rdata),
+        .mem_rsp_fault(1'b0),
+
+        .invalidate(icache_invalidate_w)
+    );
+`else
+    // No icache: core IF port goes straight to SRAM port A.
+    assign sram_a_req_valid = if_req_valid;
+    assign sram_a_req_addr  = if_req_addr;
+    assign if_req_ready     = sram_a_req_ready;
+    assign if_rsp_valid     = sram_a_rsp_valid;
+    assign if_rsp_data      = sram_a_rsp_rdata;
+    assign if_rsp_fault     = 1'b0;
+`endif
+
     // ---------- SRAM ----------
     sram_dp #(.WORDS(SRAM_WORDS), .INIT_FILE(SRAM_INIT_FILE)) u_sram (
         .clk(clk),
-        .a_req_valid(if_req_valid), .a_req_addr(if_req_addr),
-        .a_req_ready(if_req_ready),
-        .a_rsp_valid(if_rsp_valid), .a_rsp_rdata(if_rsp_data),
+        .a_req_valid(sram_a_req_valid), .a_req_addr(sram_a_req_addr),
+        .a_req_ready(sram_a_req_ready),
+        .a_rsp_valid(sram_a_rsp_valid), .a_rsp_rdata(sram_a_rsp_rdata),
 
         .b_req_valid(sram_b_req_valid), .b_req_addr(sram_b_req_addr),
         .b_req_wen(sram_b_req_wen), .b_req_wmask(sram_b_req_wmask), .b_req_wdata(sram_b_req_wdata),
         .b_req_ready(sram_b_req_ready),
         .b_rsp_valid(sram_b_rsp_valid), .b_rsp_rdata(sram_b_rsp_rdata)
     );
-
-    // ifetch cannot fault in Stage 0/1 (we only ever fetch from SRAM region).
-    // If the PC ever lands outside, the access is simply undefined; we don't
-    // propagate a fault in this revision.
-    assign if_rsp_fault = 1'b0;
 
     // ---------- MMIO ----------
     mmio u_mmio (

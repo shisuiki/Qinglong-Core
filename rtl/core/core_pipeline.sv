@@ -69,7 +69,10 @@ module core_pipeline #(
     output logic [4:0]  commit_rd_addr,
     output logic [31:0] commit_rd_data,
     output logic        commit_trap,
-    output logic [31:0] commit_cause
+    output logic [31:0] commit_cause,
+
+    // ---- icache invalidate on FENCE.I (1-cycle pulse at retirement) ----
+    output logic        icache_invalidate
 `ifdef RISCV_FORMAL
     ,`RVFI_OUTPUTS
 `endif
@@ -1233,17 +1236,33 @@ module core_pipeline #(
     assign commit_trap    = wb_valid_q && wb_trap_q;
     assign commit_cause   = wb_cause_q;
 
-    // Redirect on trap or MRET
-    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q);
+    // FENCE.I retiring at WB: detected directly from the instr bits — no need
+    // to carry a dedicated bit through every stage. We treat it like a
+    // mini-redirect: flush IF/ID/EX (wb_redirect) and pulse an icache
+    // invalidate so the next fetch (pc+4) misses and re-reads from memory.
+    wire wb_is_fence_i = wb_valid_q && !wb_trap_q &&
+                         (wb_instr_q[6:0]   == `OP_MISC_MEM) &&
+                         (wb_instr_q[14:12] == 3'b001);
+
+    // Redirect on trap, MRET, or FENCE.I
+    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_fence_i);
     always_comb begin
         wb_redirect_pc = {mtvec_v[31:2], 2'b00};
         if (wb_is_mret_q && !wb_trap_q) begin
             wb_redirect_pc = mepc_v;
+        end else if (wb_is_fence_i) begin
+            wb_redirect_pc = wb_pc_q + 32'd4;
         end else if (wb_trap_q && mtvec_v[0] && wb_cause_q[31]) begin
             // Vectored mode, interrupt: base + 4*cause_code[3:0]
             wb_redirect_pc = {mtvec_v[31:2], 2'b00} + {26'd0, wb_cause_q[3:0], 2'b00};
         end
     end
+
+    // Pulse the icache invalidate line when FENCE.I retires. Serializing
+    // semantics ensure IF/ID/EX/MEM are drained at this point, and the
+    // wb_redirect above forces the next fetch (pc+4) to go through the cache
+    // with its valid bits freshly cleared.
+    assign icache_invalidate = wb_is_fence_i;
 
     // trap_pending latch: prevents further fetches between EX trap detect and
     // WB trap commit. Redundant with wb_redirect now that branch_redirect is
