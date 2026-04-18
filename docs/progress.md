@@ -2,6 +2,30 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-2c: MMU TLB + SFENCE.VMA
+
+### What shipped
+- **4-entry fully-associative TLB per side (`rtl/core/mmu.sv`)**. Each entry caches `{valid, is_sp, vpn[19:0], ppn[21:0], r, w, x, u, a, d}`. Tag match: `vpn[19:10]` always, `vpn[9:0]` only when `is_sp=0`. Fills on every well-formed walk leaf (4 MiB superpage at L1 or 4 KiB page at L0), even if the live permission check denied — flags are cached raw and the permission check runs live against current `priv/SUM/MXR` on every hit, so privilege-context changes never use a stale decision. Round-robin replacement per side. Walk kickoff is gated on TLB miss.
+- **TLB fast-path stuffs the walk-result cache (`rtl/core/mmu.sv`)**. On a TLB hit, the combinational path forwards zero-latency — but when the request leaves for the downstream and the response doesn't complete same cycle, the seq block stuffs `dm_xlate_valid_q=1 / dm_xlate_pa_q=dm_tlb_pa` so the late-arriving response routes through `dm_forward` on the next cycle. Required for the multicycle core, which drops `dmem_req_valid` on the S_EXEC→S_MEM transition; without this the MMU's priority chain falls into the "stall" default and the response gets dropped. Pipeline wasn't affected (it holds req_valid until rsp).
+- **SFENCE.VMA decode + retire pulse (`rtl/core/core_pipeline.sv`, `rtl/core/core_multicycle.sv`, `rtl/soc/soc_top.sv`, `rtl/core/mmu.sv`)**. Recognizes `funct7=7'b0001001, funct3=000, rd=x0` as `SFENCE.VMA` (rs1/rs2 ignored — no per-ASID or per-VPN support yet). Pipeline serializes like `FENCE.I` / MRET (drained via the `id_is_serial` gate), pulses `mmu_sfence_vma` for 1 cycle on the WB-stage retire, and redirects to `pc+4`. Multicycle pulses on the S_EXEC commit. MMU flushes both per-side TLBs on the pulse. `id_rd != 0` with this encoding is still illegal.
+- **Walk-kickoff guard** now also checks `!tlb_hit` so a same-cycle fill-then-match doesn't double-walk.
+
+### Tests
+- **MMU smoke test**: PASS on multicycle (26,938 cycles, down from 26,943 in 6C-2b — the TLB saves the 2nd store's re-walk) and pipeline+icache+dcache (24,857 cycles, down from 41,606). Every access now hits in the TLB after the first miss.
+- **Sim regression** (`make sim-all`, both cores, with and without caches): **73/76** — unchanged vs 6C-2b baseline. No new regressions.
+- **Sim C regression** (`make sim-c CORE=pipeline ICACHE=1 DCACHE=1`): 7/7 PASS.
+- **Sim FreeRTOS** boots and runs the `hello` / `blink` tasks (bare mode, passthrough unchanged).
+
+### Design notes
+- The TLB fast-path stuffing a walk-cache entry is the one subtle piece. Without it the multicycle hang is deterministic: cycle N handshakes the request via `dm_tlb_go`, cycle N+1 sees `dm_core_req_valid=0`, `dm_tlb_hit=0` (addr reset), `dm_xlate_valid_q=0` — so the forward logic falls into the default branch that swallows the response. With the stuff, cycle N+1 hits `dm_forward`, routes the response, and `dm_forward_rsp_done` clears the cache for the next request. The pipeline core never exposed this because it holds `req_valid=1` until the rsp handshakes — the TLB-hit branch stays selected the entire time.
+- Flags are cached **raw**: no `sum` / `mxr` pre-bake. A flip of `mstatus.SUM` doesn't require an SFENCE because the live `perm_ok()` on every hit uses current CSR state. Simpler than a sum/mxr-tagged TLB and loses nothing in perf (perm_ok is one level of combinational muxing).
+
+### Residuals (deferred)
+- SFENCE.VMA still ignores rs1 / rs2 (no ASID field, no per-VPN flush) — we flush everything on every pulse. That's spec-legal (coarser than a single-VPN flush) but throws away hits unnecessarily; upgrade when / if ASIDs land.
+- `rv32mi-p-illegal` still parked — it exercises a broader set of illegal encodings than SFENCE.VMA alone, and unblocking it needs the page-fault cause distinction below.
+- Page faults still fold into `rsp_fault` (access-fault cause). Future refinement: separate `rsp_pagefault` with `INSN/LOAD/STORE_PAGE_FAULT` causes.
+- Ifetch translation is exercised only indirectly through the smoke test's instruction fetches from the SRAM identity superpage. A real S-mode ifetch test needs `MRET` to drop priv and would pair nicely with page-fault causes.
+
 ## 2026-04-18 — Stage 6C-2 (a+b): SV32 MMU — skeleton, PTW, SRAM-port-B arbiter
 
 ### What shipped

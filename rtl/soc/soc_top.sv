@@ -104,6 +104,9 @@ module soc_top #(
     // flush is needed to pair with FENCE.I.
     logic icache_invalidate_w;
 
+    // SFENCE.VMA → MMU TLB flush pulse (Stage 6C-2c).
+    logic mmu_sfence_vma_w;
+
 `ifdef USE_PIPELINE_CORE
     core_pipeline #(.RESET_PC(RESET_PC)) u_core (
         .clk(clk), .rst(rst),
@@ -125,6 +128,7 @@ module soc_top #(
         .commit_trap(commit_trap), .commit_cause(commit_cause),
 
         .icache_invalidate(icache_invalidate_w),
+        .mmu_sfence_vma(mmu_sfence_vma_w),
 
         .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
@@ -153,7 +157,8 @@ module soc_top #(
 
         .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
-        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w)
+        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w),
+        .mmu_sfence_vma(mmu_sfence_vma_w)
     );
 `endif
 
@@ -163,12 +168,13 @@ module soc_top #(
     logic        ptw_mem_rsp_valid, ptw_mem_rsp_fault;
     logic [31:0] ptw_mem_rsp_rdata;
 
-    // ---------- MMU (Stage 6C-2b: SV32 PTW, no TLB yet) ----------
+    // ---------- MMU (Stage 6C-2c: SV32 PTW + per-side fully-assoc TLB) ----------
     mmu u_mmu (
         .clk(clk), .rst(rst),
         .satp_i(mmu_satp_w), .priv_i(mmu_priv_w),
         .mprv_i(mmu_mprv_w), .mpp_i(mmu_mpp_w),
         .sum_i(mmu_sum_w),   .mxr_i(mmu_mxr_w),
+        .sfence_vma_i(mmu_sfence_vma_w),
 
         .if_core_req_valid(core_if_req_valid), .if_core_req_addr(core_if_req_addr), .if_core_req_ready(core_if_req_ready),
         .if_core_rsp_valid(core_if_rsp_valid), .if_core_rsp_data(core_if_rsp_data), .if_core_rsp_fault(core_if_rsp_fault),

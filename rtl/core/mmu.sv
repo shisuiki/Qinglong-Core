@@ -52,6 +52,10 @@ module mmu (
     input  logic        sum_i,
     input  logic        mxr_i,
 
+    // 1-cycle pulse from the core when SFENCE.VMA retires — flush the TLB.
+    // Per-ASID / per-VPN flushing isn't supported; we flush everything.
+    input  logic        sfence_vma_i,
+
     // --- ifetch core-facing (upstream) ---
     input  logic        if_core_req_valid,
     input  logic [31:0] if_core_req_addr,
@@ -126,6 +130,70 @@ module mmu (
     logic [31:0] dm_xlate_pa_q,    dm_xlate_pa_d;
 
     // ---------------------------------------------------------------------
+    // TLB — per-side fully-associative, SW-managed.
+    //
+    // Each entry caches the PTE flags + PPN for a VPN. The PPN is stored as
+    // 22 bits (ppn1[11:0] || ppn0[9:0]); the 34→32 bit truncation we do
+    // elsewhere means only ppn[19:0] actually reaches the downstream. The
+    // `is_sp` flag selects whether VPN[0] is part of the tag (4 KiB page) or
+    // is a don't-care (4 MiB superpage). Flags are cached raw — permission
+    // checks run live against current priv / SUM / MXR on every hit so that
+    // privilege-context changes don't silently use a stale decision.
+    // ---------------------------------------------------------------------
+    localparam int unsigned TLB_N = 4;
+
+    typedef struct packed {
+        logic        valid;
+        logic        is_sp;      // 1 = 4 MiB superpage (ignore vpn[9:0])
+        logic [19:0] vpn;        // [19:10]=VPN[1], [9:0]=VPN[0]
+        logic [21:0] ppn;        // [21:10]=ppn1, [9:0]=ppn0
+        logic        r, w, x, u, a, d;
+    } tlb_entry_t;
+
+    tlb_entry_t                 if_tlb_q [TLB_N];
+    tlb_entry_t                 dm_tlb_q [TLB_N];
+    logic [$clog2(TLB_N)-1:0]   if_repl_q, dm_repl_q;
+
+    // Lookup — fully-associative match with superpage mask on VPN[0].
+    function automatic logic tlb_match (tlb_entry_t e, logic [31:0] va);
+        return e.valid &&
+               (e.vpn[19:10] == va[31:22]) &&
+               (e.is_sp || (e.vpn[9:0] == va[21:12]));
+    endfunction
+
+    logic       if_tlb_hit;
+    tlb_entry_t if_tlb_hit_e;
+    always_comb begin
+        if_tlb_hit   = 1'b0;
+        if_tlb_hit_e = '0;
+        for (int unsigned i = 0; i < TLB_N; i++) begin
+            if (tlb_match(if_tlb_q[i], if_core_req_addr)) begin
+                if_tlb_hit   = 1'b1;
+                if_tlb_hit_e = if_tlb_q[i];
+            end
+        end
+    end
+
+    logic       dm_tlb_hit;
+    tlb_entry_t dm_tlb_hit_e;
+    always_comb begin
+        dm_tlb_hit   = 1'b0;
+        dm_tlb_hit_e = '0;
+        for (int unsigned i = 0; i < TLB_N; i++) begin
+            if (tlb_match(dm_tlb_q[i], dm_core_req_addr)) begin
+                dm_tlb_hit   = 1'b1;
+                dm_tlb_hit_e = dm_tlb_q[i];
+            end
+        end
+    end
+
+    // TLB fill (set at walk completion; committed in the sequential block).
+    logic       if_tlb_fill;
+    tlb_entry_t if_tlb_fill_e;
+    logic       dm_tlb_fill;
+    tlb_entry_t dm_tlb_fill_e;
+
+    // ---------------------------------------------------------------------
     // Shared PTW
     // ---------------------------------------------------------------------
     typedef enum logic [2:0] {
@@ -145,9 +213,9 @@ module mmu (
     logic [11:0] ptw_l1_ppn1_q, ptw_l1_ppn1_d; // from L1 PTE for L0 step
     logic [9:0]  ptw_l1_ppn0_q, ptw_l1_ppn0_d;
 
-    // Walk kickoff (only from IDLE).
-    wire if_needs_walk = xlate_if && if_core_req_valid && !if_xlate_valid_q;
-    wire dm_needs_walk = xlate_dm && dm_core_req_valid && !dm_xlate_valid_q;
+    // Walk kickoff — only when TLB misses AND the walk-result cache is empty.
+    wire if_needs_walk = xlate_if && if_core_req_valid && !if_tlb_hit && !if_xlate_valid_q;
+    wire dm_needs_walk = xlate_dm && dm_core_req_valid && !dm_tlb_hit && !dm_xlate_valid_q;
     wire launch_if = (ptw_state_q == PTW_IDLE) && if_needs_walk;
     wire launch_dm = (ptw_state_q == PTW_IDLE) && !if_needs_walk && dm_needs_walk;
 
@@ -197,7 +265,8 @@ module mmu (
                                pte_r, pte_w, pte_x, pte_u, pte_a, pte_d,
                                sum_i, mxr_i);
     wire l1_leaf_ok = !l1_leaf_misaligned && pte_perm_ok;
-    wire l0_leaf_ok = !ptw_rsp_fault && !pte_is_bad && pte_is_leaf && pte_perm_ok;
+    wire l0_well_formed = !ptw_rsp_fault && !pte_is_bad && pte_is_leaf;
+    wire l0_leaf_ok = l0_well_formed && pte_perm_ok;
 
     // Default next-state
     always_comb begin
@@ -216,6 +285,12 @@ module mmu (
         dm_xlate_valid_d = dm_xlate_valid_q;
         dm_xlate_fault_d = dm_xlate_fault_q;
         dm_xlate_pa_d    = dm_xlate_pa_q;
+
+        // TLB fills default off; walk completion asserts these on valid leaf.
+        if_tlb_fill   = 1'b0;
+        if_tlb_fill_e = '0;
+        dm_tlb_fill   = 1'b0;
+        dm_tlb_fill_e = '0;
 
         ptw_req_valid = 1'b0;
         ptw_req_addr  = 32'd0;
@@ -267,10 +342,38 @@ module mmu (
                             if_xlate_valid_d = 1'b1;
                             if_xlate_fault_d = !l1_leaf_ok;
                             if_xlate_pa_d    = l1_leaf_ok ? {pte_ppn1, ptw_va_q[21:0]} : 32'd0;
+                            // Fill TLB on a well-formed superpage (even if the
+                            // live permission check failed — fault stays out).
+                            if (!l1_leaf_misaligned) begin
+                                if_tlb_fill           = 1'b1;
+                                if_tlb_fill_e.valid   = 1'b1;
+                                if_tlb_fill_e.is_sp   = 1'b1;
+                                if_tlb_fill_e.vpn     = {ptw_va_q[31:22], 10'd0};
+                                if_tlb_fill_e.ppn     = {pte_ppn1[11:0], 10'd0};
+                                if_tlb_fill_e.r       = pte_r;
+                                if_tlb_fill_e.w       = pte_w;
+                                if_tlb_fill_e.x       = pte_x;
+                                if_tlb_fill_e.u       = pte_u;
+                                if_tlb_fill_e.a       = pte_a;
+                                if_tlb_fill_e.d       = pte_d;
+                            end
                         end else begin
                             dm_xlate_valid_d = 1'b1;
                             dm_xlate_fault_d = !l1_leaf_ok;
                             dm_xlate_pa_d    = l1_leaf_ok ? {pte_ppn1, ptw_va_q[21:0]} : 32'd0;
+                            if (!l1_leaf_misaligned) begin
+                                dm_tlb_fill           = 1'b1;
+                                dm_tlb_fill_e.valid   = 1'b1;
+                                dm_tlb_fill_e.is_sp   = 1'b1;
+                                dm_tlb_fill_e.vpn     = {ptw_va_q[31:22], 10'd0};
+                                dm_tlb_fill_e.ppn     = {pte_ppn1[11:0], 10'd0};
+                                dm_tlb_fill_e.r       = pte_r;
+                                dm_tlb_fill_e.w       = pte_w;
+                                dm_tlb_fill_e.x       = pte_x;
+                                dm_tlb_fill_e.u       = pte_u;
+                                dm_tlb_fill_e.a       = pte_a;
+                                dm_tlb_fill_e.d       = pte_d;
+                            end
                         end
                         ptw_state_d = PTW_IDLE;
                     end else begin
@@ -291,14 +394,43 @@ module mmu (
 
             PTW_L0_WAIT: begin
                 if (ptw_rsp_valid) begin
+                    // Fill TLB on a well-formed L0 leaf (regardless of whether
+                    // the live permission check failed). l0_well_formed is
+                    // hoisted above so latch inference doesn't trip.
                     if (ptw_side_q == 1'b0) begin
                         if_xlate_valid_d = 1'b1;
                         if_xlate_fault_d = !l0_leaf_ok;
                         if_xlate_pa_d    = l0_leaf_ok ? {pte_ppn1[9:0], pte_ppn0, ptw_va_q[11:0]} : 32'd0;
+                        if (l0_well_formed) begin
+                            if_tlb_fill           = 1'b1;
+                            if_tlb_fill_e.valid   = 1'b1;
+                            if_tlb_fill_e.is_sp   = 1'b0;
+                            if_tlb_fill_e.vpn     = {ptw_va_q[31:22], ptw_va_q[21:12]};
+                            if_tlb_fill_e.ppn     = {pte_ppn1[11:0], pte_ppn0[9:0]};
+                            if_tlb_fill_e.r       = pte_r;
+                            if_tlb_fill_e.w       = pte_w;
+                            if_tlb_fill_e.x       = pte_x;
+                            if_tlb_fill_e.u       = pte_u;
+                            if_tlb_fill_e.a       = pte_a;
+                            if_tlb_fill_e.d       = pte_d;
+                        end
                     end else begin
                         dm_xlate_valid_d = 1'b1;
                         dm_xlate_fault_d = !l0_leaf_ok;
                         dm_xlate_pa_d    = l0_leaf_ok ? {pte_ppn1[9:0], pte_ppn0, ptw_va_q[11:0]} : 32'd0;
+                        if (l0_well_formed) begin
+                            dm_tlb_fill           = 1'b1;
+                            dm_tlb_fill_e.valid   = 1'b1;
+                            dm_tlb_fill_e.is_sp   = 1'b0;
+                            dm_tlb_fill_e.vpn     = {ptw_va_q[31:22], ptw_va_q[21:12]};
+                            dm_tlb_fill_e.ppn     = {pte_ppn1[11:0], pte_ppn0[9:0]};
+                            dm_tlb_fill_e.r       = pte_r;
+                            dm_tlb_fill_e.w       = pte_w;
+                            dm_tlb_fill_e.x       = pte_x;
+                            dm_tlb_fill_e.u       = pte_u;
+                            dm_tlb_fill_e.a       = pte_a;
+                            dm_tlb_fill_e.d       = pte_d;
+                        end
                     end
                     ptw_state_d = PTW_IDLE;
                 end
@@ -313,7 +445,38 @@ module mmu (
 
     // ---------------------------------------------------------------------
     // Request / response forwarding per side
+    //
+    // Priority on a translated side is:
+    //   1. TLB hit  → permission check against live CSR state; forward PA
+    //                 (or synthesize a fault). Zero-latency hot path.
+    //   2. Walk-result cache valid (walk just completed for the current
+    //                 outstanding request) → forward from cached result.
+    //   3. Otherwise stall the core while the walk executes.
     // ---------------------------------------------------------------------
+
+    // Live permission check on a TLB entry against the current priv context.
+    wire if_tlb_perm_ok = perm_ok(priv_i, 1'b1, 1'b0,
+        if_tlb_hit_e.r, if_tlb_hit_e.w, if_tlb_hit_e.x,
+        if_tlb_hit_e.u, if_tlb_hit_e.a, if_tlb_hit_e.d,
+        sum_i, mxr_i);
+    wire dm_tlb_perm_ok = perm_ok(dm_eff_priv, 1'b0, dm_core_req_wen,
+        dm_tlb_hit_e.r, dm_tlb_hit_e.w, dm_tlb_hit_e.x,
+        dm_tlb_hit_e.u, dm_tlb_hit_e.a, dm_tlb_hit_e.d,
+        sum_i, mxr_i);
+
+    // TLB-derived PA (34→32 bit truncation).
+    wire [31:0] if_tlb_pa = if_tlb_hit_e.is_sp
+        ? {if_tlb_hit_e.ppn[21:10], if_core_req_addr[21:0]}
+        : {if_tlb_hit_e.ppn, if_core_req_addr[11:0]};
+    wire [31:0] dm_tlb_pa = dm_tlb_hit_e.is_sp
+        ? {dm_tlb_hit_e.ppn[21:10], dm_core_req_addr[21:0]}
+        : {dm_tlb_hit_e.ppn, dm_core_req_addr[11:0]};
+
+    wire if_tlb_go     = xlate_if && if_tlb_hit &&  if_tlb_perm_ok;
+    wire if_tlb_deny   = xlate_if && if_tlb_hit && !if_tlb_perm_ok;
+    wire dm_tlb_go     = xlate_dm && dm_tlb_hit &&  dm_tlb_perm_ok;
+    wire dm_tlb_deny   = xlate_dm && dm_tlb_hit && !dm_tlb_perm_ok;
+
     // IFETCH
     wire if_forward = xlate_if && if_xlate_valid_q && !if_xlate_fault_q;
     wire if_fault_reply = xlate_if && if_xlate_valid_q &&  if_xlate_fault_q;
@@ -328,8 +491,24 @@ module mmu (
             if_core_rsp_data  = if_ds_rsp_data;
             if_core_rsp_fault = if_ds_rsp_fault;
             if_ds_rsp_ready   = if_core_rsp_ready;
+        end else if (if_tlb_go) begin
+            // TLB hit — forward with translated PA.
+            if_ds_req_valid   = if_core_req_valid;
+            if_ds_req_addr    = if_tlb_pa;
+            if_core_req_ready = if_ds_req_ready;
+            if_core_rsp_valid = if_ds_rsp_valid;
+            if_core_rsp_data  = if_ds_rsp_data;
+            if_core_rsp_fault = if_ds_rsp_fault;
+            if_ds_rsp_ready   = if_core_rsp_ready;
+        end else if (if_tlb_deny) begin
+            if_ds_req_valid   = 1'b0;
+            if_ds_req_addr    = 32'd0;
+            if_core_req_ready = 1'b1;
+            if_core_rsp_valid = 1'b1;
+            if_core_rsp_data  = 32'd0;
+            if_core_rsp_fault = 1'b1;
+            if_ds_rsp_ready   = 1'b1;
         end else if (if_forward) begin
-            // Forward with translated PA.
             if_ds_req_valid   = if_core_req_valid;
             if_ds_req_addr    = if_xlate_pa_q;
             if_core_req_ready = if_ds_req_ready;
@@ -338,16 +517,14 @@ module mmu (
             if_core_rsp_fault = if_ds_rsp_fault;
             if_ds_rsp_ready   = if_core_rsp_ready;
         end else if (if_fault_reply) begin
-            // Synthetic fault response, no downstream request.
             if_ds_req_valid   = 1'b0;
             if_ds_req_addr    = 32'd0;
-            if_core_req_ready = 1'b1;   // accept and respond same-cycle window
+            if_core_req_ready = 1'b1;
             if_core_rsp_valid = 1'b1;
             if_core_rsp_data  = 32'd0;
             if_core_rsp_fault = 1'b1;
             if_ds_rsp_ready   = 1'b1;
         end else begin
-            // Walk in progress (or about to be). Stall the core.
             if_ds_req_valid   = 1'b0;
             if_ds_req_addr    = 32'd0;
             if_core_req_ready = 1'b0;
@@ -358,7 +535,6 @@ module mmu (
         end
     end
 
-    // Clear the walk-result cache once the request/response handshake retires.
     wire if_forward_rsp_done = if_forward && if_ds_rsp_valid && if_core_rsp_ready;
     wire if_fault_rsp_done   = if_fault_reply && if_core_rsp_ready;
 
@@ -379,6 +555,30 @@ module mmu (
             dm_core_rsp_rdata = dm_ds_rsp_rdata;
             dm_core_rsp_fault = dm_ds_rsp_fault;
             dm_ds_rsp_ready   = dm_core_rsp_ready;
+        end else if (dm_tlb_go) begin
+            dm_ds_req_valid   = dm_core_req_valid;
+            dm_ds_req_addr    = dm_tlb_pa;
+            dm_ds_req_wen     = dm_core_req_wen;
+            dm_ds_req_wdata   = dm_core_req_wdata;
+            dm_ds_req_wmask   = dm_core_req_wmask;
+            dm_ds_req_size    = dm_core_req_size;
+            dm_core_req_ready = dm_ds_req_ready;
+            dm_core_rsp_valid = dm_ds_rsp_valid;
+            dm_core_rsp_rdata = dm_ds_rsp_rdata;
+            dm_core_rsp_fault = dm_ds_rsp_fault;
+            dm_ds_rsp_ready   = dm_core_rsp_ready;
+        end else if (dm_tlb_deny) begin
+            dm_ds_req_valid   = 1'b0;
+            dm_ds_req_addr    = 32'd0;
+            dm_ds_req_wen     = 1'b0;
+            dm_ds_req_wdata   = 32'd0;
+            dm_ds_req_wmask   = 4'd0;
+            dm_ds_req_size    = 2'd0;
+            dm_core_req_ready = 1'b1;
+            dm_core_rsp_valid = 1'b1;
+            dm_core_rsp_rdata = 32'd0;
+            dm_core_rsp_fault = 1'b1;
+            dm_ds_rsp_ready   = 1'b1;
         end else if (dm_forward) begin
             dm_ds_req_valid   = dm_core_req_valid;
             dm_ds_req_addr    = dm_xlate_pa_q;
@@ -421,9 +621,20 @@ module mmu (
     wire dm_forward_rsp_done = dm_forward && dm_ds_rsp_valid && dm_core_rsp_ready;
     wire dm_fault_rsp_done   = dm_fault_reply && dm_core_rsp_ready;
 
-    // ---------------------------------------------------------------------
-    // Sequential state
-    // ---------------------------------------------------------------------
+    // TLB fast-path handshake signals. A TLB hit forwards the request
+    // zero-latency in the combinational block; these track whether the
+    // request left for the downstream and whether its response closed same
+    // cycle. When the request fires but the response doesn't, the
+    // walk-result cache gets stuffed so downstream's late-arriving rsp still
+    // routes through the `dm_forward` branch — important for the multicycle
+    // core, which drops req_valid the cycle after req_ready pulses.
+    wire if_tlb_req_fire     = if_tlb_go   && if_core_req_valid && if_ds_req_ready;
+    wire if_tlb_rsp_fire     = if_tlb_go   && if_ds_rsp_valid   && if_core_rsp_ready;
+    wire if_tlb_deny_fire    = if_tlb_deny && if_core_req_valid && if_core_rsp_ready;
+    wire dm_tlb_req_fire     = dm_tlb_go   && dm_core_req_valid && dm_ds_req_ready;
+    wire dm_tlb_rsp_fire     = dm_tlb_go   && dm_ds_rsp_valid   && dm_core_rsp_ready;
+    wire dm_tlb_deny_fire    = dm_tlb_deny && dm_core_req_valid && dm_core_rsp_ready;
+
     always_ff @(posedge clk) begin
         if (rst) begin
             ptw_state_q      <= PTW_IDLE;
@@ -440,6 +651,12 @@ module mmu (
             dm_xlate_valid_q <= 1'b0;
             dm_xlate_fault_q <= 1'b0;
             dm_xlate_pa_q    <= 32'd0;
+            if_repl_q        <= '0;
+            dm_repl_q        <= '0;
+            for (int unsigned i = 0; i < TLB_N; i++) begin
+                if_tlb_q[i] <= '0;
+                dm_tlb_q[i] <= '0;
+            end
         end else begin
             ptw_state_q    <= ptw_state_d;
             ptw_side_q     <= ptw_side_d;
@@ -458,14 +675,62 @@ module mmu (
             dm_xlate_fault_q <= dm_xlate_fault_d;
             dm_xlate_pa_q    <= dm_xlate_pa_d;
 
-            // Clear the result when the current transaction retires.
-            if (if_forward_rsp_done || if_fault_rsp_done) begin
+            // Stuff the walk-result cache from a TLB fast-path handshake if
+            // the rsp didn't complete same cycle. This lets the next-cycle
+            // rsp route through `dm_forward` even after the core (multicycle)
+            // has dropped req_valid. We guard on !valid_q so we don't stomp
+            // on an in-flight walk result.
+            if (if_tlb_req_fire && !if_tlb_rsp_fire && !if_xlate_valid_q) begin
+                if_xlate_valid_q <= 1'b1;
+                if_xlate_fault_q <= 1'b0;
+                if_xlate_pa_q    <= if_tlb_pa;
+            end
+            if (if_tlb_deny && if_core_req_valid && !if_tlb_deny_fire && !if_xlate_valid_q) begin
+                if_xlate_valid_q <= 1'b1;
+                if_xlate_fault_q <= 1'b1;
+            end
+            if (dm_tlb_req_fire && !dm_tlb_rsp_fire && !dm_xlate_valid_q) begin
+                dm_xlate_valid_q <= 1'b1;
+                dm_xlate_fault_q <= 1'b0;
+                dm_xlate_pa_q    <= dm_tlb_pa;
+            end
+            if (dm_tlb_deny && dm_core_req_valid && !dm_tlb_deny_fire && !dm_xlate_valid_q) begin
+                dm_xlate_valid_q <= 1'b1;
+                dm_xlate_fault_q <= 1'b1;
+            end
+
+            // Clear the result when the current transaction retires. This
+            // also catches the same-cycle TLB fast-path rsp in case the
+            // walk-result cache had been stuffed by a prior TLB req.
+            if (if_forward_rsp_done || if_fault_rsp_done ||
+                if_tlb_rsp_fire     || if_tlb_deny_fire) begin
                 if_xlate_valid_q <= 1'b0;
                 if_xlate_fault_q <= 1'b0;
             end
-            if (dm_forward_rsp_done || dm_fault_rsp_done) begin
+            if (dm_forward_rsp_done || dm_fault_rsp_done ||
+                dm_tlb_rsp_fire     || dm_tlb_deny_fire) begin
                 dm_xlate_valid_q <= 1'b0;
                 dm_xlate_fault_q <= 1'b0;
+            end
+
+            // TLB fill (round-robin replacement). Fill wins over sfence in the
+            // same cycle — if SW issues SFENCE.VMA exactly as a walk retires,
+            // the filled entry will be flushed on the next sfence.
+            if (if_tlb_fill) begin
+                if_tlb_q[if_repl_q] <= if_tlb_fill_e;
+                if_repl_q           <= if_repl_q + 1'b1;
+            end
+            if (dm_tlb_fill) begin
+                dm_tlb_q[dm_repl_q] <= dm_tlb_fill_e;
+                dm_repl_q           <= dm_repl_q + 1'b1;
+            end
+
+            // SFENCE.VMA: flush everything. No ASID / no per-VPN support.
+            if (sfence_vma_i) begin
+                for (int unsigned i = 0; i < TLB_N; i++) begin
+                    if_tlb_q[i].valid <= 1'b0;
+                    dm_tlb_q[i].valid <= 1'b0;
+                end
             end
         end
     end

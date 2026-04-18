@@ -66,7 +66,10 @@ module core_multicycle #(
     output logic        mmu_mprv,
     output logic [1:0]  mmu_mpp,
     output logic        mmu_sum,
-    output logic        mmu_mxr
+    output logic        mmu_mxr,
+
+    // ---- TLB flush on SFENCE.VMA retirement (1-cycle pulse) ----
+    output logic        mmu_sfence_vma
 );
 
     // =========================================================================
@@ -134,6 +137,7 @@ module core_multicycle #(
     wire is_ebreak = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h001);
     wire is_mret   = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h302);
     wire is_wfi    = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h105);
+    wire is_sfence = is_system && (funct3 == `F3_PRIV) && (instr_q[31:25] == 7'b0001001);
     wire is_csr    = is_system && (funct3 != `F3_PRIV);
     wire is_priv_op = is_ecall | is_ebreak | is_mret | is_wfi;
 
@@ -204,6 +208,10 @@ module core_multicycle #(
     assign mmu_priv = priv_mode_v;
     assign mmu_mprv = mstatus_mprv_v;
     assign mmu_mpp  = mstatus_mpp_v;
+
+    // SFENCE.VMA pulses on retirement. Multicycle already drains fully
+    // between instructions, so no redirect is needed — just flash the line.
+    assign mmu_sfence_vma = is_sfence && commit_valid && !commit_trap;
     assign mmu_sum  = sstatus_sum_v;
     assign mmu_mxr  = mstatus_mxr_v;
 
@@ -337,13 +345,18 @@ module core_multicycle #(
 
         // SYSTEM / CSR decode
         if (is_system && (funct3 == `F3_PRIV)) begin
-            // ECALL (0x000), EBREAK (0x001), MRET (0x302), WFI (0x105).
-            case (instr_q[31:20])
-                12'h000, 12'h001, 12'h302, 12'h105: /* ok */ ;
-                default: illegal_opcode = 1'b1;
-            endcase
-            // rs1 and rd must be zero for these
-            if (rd_i != 5'd0 || rs1_i != 5'd0) illegal_opcode = 1'b1;
+            if (is_sfence) begin
+                // SFENCE.VMA rs1, rs2. rs1/rs2 are operands; rd must be 0.
+                if (rd_i != 5'd0) illegal_opcode = 1'b1;
+            end else begin
+                // ECALL (0x000), EBREAK (0x001), MRET (0x302), WFI (0x105).
+                case (instr_q[31:20])
+                    12'h000, 12'h001, 12'h302, 12'h105: /* ok */ ;
+                    default: illegal_opcode = 1'b1;
+                endcase
+                // rs1 and rd must be zero for these
+                if (rd_i != 5'd0 || rs1_i != 5'd0) illegal_opcode = 1'b1;
+            end
         end
     end
 

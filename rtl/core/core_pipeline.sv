@@ -74,6 +74,9 @@ module core_pipeline #(
     // ---- icache invalidate on FENCE.I (1-cycle pulse at retirement) ----
     output logic        icache_invalidate,
 
+    // ---- TLB flush on SFENCE.VMA (1-cycle pulse at retirement) ----
+    output logic        mmu_sfence_vma,
+
     // ---- CSR state visible to the MMU (Stage 6C-2) ----
     output logic [31:0] mmu_satp,
     output logic [1:0]  mmu_priv,
@@ -370,6 +373,8 @@ module core_pipeline #(
     wire id_is_mret    = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h302);
     wire id_is_sret    = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h102);
     wire id_is_wfi     = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h105);
+    // SFENCE.VMA: funct7=0001001, rs2/rs1 are operands (we ignore both — flush-all)
+    wire id_is_sfence  = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:25] == 7'b0001001);
     wire id_is_csr     = id_is_system && (id_funct3 != `F3_PRIV);
     wire id_is_muldiv  = id_is_op && (id_funct7 == `F7_MULDIV);
     wire id_is_mul     = id_is_muldiv && !id_funct3[2];
@@ -389,7 +394,8 @@ module core_pipeline #(
     wire id_is_atomic  = id_is_lr || id_is_sc || id_is_amo_rmw;
 
     wire id_is_serial  = id_is_csr || id_is_mret || id_is_sret || id_is_ecall ||
-                         id_is_ebreak || id_is_wfi || id_is_misc || id_is_atomic;
+                         id_is_ebreak || id_is_wfi || id_is_misc || id_is_atomic ||
+                         id_is_sfence;
 
     wire id_rs1_used = id_is_jalr || id_is_branch || id_is_load || id_is_store ||
                        id_is_op_imm || id_is_op || id_is_atomic ||
@@ -445,11 +451,16 @@ module core_pipeline #(
             endcase
         end
         if (id_is_system && (id_funct3 == `F3_PRIV)) begin
-            unique case (id_instr_q[31:20])
-                12'h000, 12'h001, 12'h302, 12'h102, 12'h105: /* ok */ ;
-                default: id_illegal = 1'b1;
-            endcase
-            if (id_rd != 5'd0 || id_rs1 != 5'd0) id_illegal = 1'b1;
+            if (id_is_sfence) begin
+                // SFENCE.VMA rs1, rs2 — rs1/rs2 are operands, rd must be 0.
+                if (id_rd != 5'd0) id_illegal = 1'b1;
+            end else begin
+                unique case (id_instr_q[31:20])
+                    12'h000, 12'h001, 12'h302, 12'h102, 12'h105: /* ok */ ;
+                    default: id_illegal = 1'b1;
+                endcase
+                if (id_rd != 5'd0 || id_rs1 != 5'd0) id_illegal = 1'b1;
+            end
         end
         // CSR illegal: writing a read-only CSR (addr[11:10]==11 and op is W/S/C with nonzero src)
         if (id_is_csr) begin
@@ -1299,8 +1310,16 @@ module core_pipeline #(
                          (wb_instr_q[6:0]   == `OP_MISC_MEM) &&
                          (wb_instr_q[14:12] == 3'b001);
 
-    // Redirect on trap, MRET/SRET, or FENCE.I
-    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_sret_q || wb_is_fence_i);
+    // Redirect on trap, MRET/SRET, FENCE.I, or SFENCE.VMA. SFENCE flushes the
+    // TLB — any instruction fetched after it (and still in earlier stages
+    // when it retires) might have been translated against the stale TLB, so
+    // re-issue from pc+4.
+    wire wb_is_sfence_redirect = wb_valid_q && !wb_trap_q &&
+                                 (wb_instr_q[6:0]   == `OP_SYSTEM) &&
+                                 (wb_instr_q[14:12] == `F3_PRIV) &&
+                                 (wb_instr_q[31:25] == 7'b0001001);
+    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_sret_q ||
+                                        wb_is_fence_i || wb_is_sfence_redirect);
     always_comb begin
         // Default: M-mode trap vector.
         wb_redirect_pc = {mtvec_v[31:2], 2'b00};
@@ -1308,7 +1327,7 @@ module core_pipeline #(
             wb_redirect_pc = mepc_v;
         end else if (wb_is_sret_q && !wb_trap_q) begin
             wb_redirect_pc = sepc_v;
-        end else if (wb_is_fence_i) begin
+        end else if (wb_is_fence_i || wb_is_sfence_redirect) begin
             wb_redirect_pc = wb_pc_q + 32'd4;
         end else if (wb_trap_q && trap_to_s_v) begin
             // Trap delegated to S-mode.
@@ -1327,6 +1346,14 @@ module core_pipeline #(
     // wb_redirect above forces the next fetch (pc+4) to go through the cache
     // with its valid bits freshly cleared.
     assign icache_invalidate = wb_is_fence_i;
+
+    // Pulse the MMU TLB flush on SFENCE.VMA retirement. Same drain argument
+    // as FENCE.I — by WB the pipeline ahead of us is empty.
+    wire wb_is_sfence = wb_valid_q && !wb_trap_q &&
+                        (wb_instr_q[6:0]   == `OP_SYSTEM) &&
+                        (wb_instr_q[14:12] == `F3_PRIV) &&
+                        (wb_instr_q[31:25] == 7'b0001001);
+    assign mmu_sfence_vma = wb_is_sfence;
 
     // trap_pending latch: prevents further fetches between EX trap detect and
     // WB trap commit. Redundant with wb_redirect now that branch_redirect is
