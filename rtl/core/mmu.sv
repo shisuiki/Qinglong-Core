@@ -55,8 +55,8 @@ module mmu (
     // PMP storage — 16 entries. A `pmp` checker instantiated inside the MMU
     // runs on both ifetch and dmem final PAs. Faults here surface as
     // access-faults (rsp_fault) distinct from page-faults.
-    input  logic [7:0]  pmp_cfg_i  [0:15],
-    input  logic [31:0] pmp_addr_i [0:15],
+    input  logic [15:0][7:0]  pmp_cfg_i,
+    input  logic [15:0][31:0] pmp_addr_i,
 
     // 1-cycle pulse from the core when SFENCE.VMA retires — flush the TLB.
     // Per-ASID / per-VPN flushing isn't supported; we flush everything.
@@ -530,9 +530,19 @@ module mmu (
         end
     end
 
+    // Unpack packed-2D port arrays for pmp.sv's unpacked-array interface.
+    wire [7:0]  pmp_cfg_unp  [0:15];
+    wire [31:0] pmp_addr_unp [0:15];
+    generate
+        for (genvar gi = 0; gi < 16; gi = gi + 1) begin : g_pmp_unpack
+            assign pmp_cfg_unp[gi]  = pmp_cfg_i[gi];
+            assign pmp_addr_unp[gi] = pmp_addr_i[gi];
+        end
+    endgenerate
+
     pmp u_pmp_if (
-        .cfg_i             (pmp_cfg_i),
-        .addr_i            (pmp_addr_i),
+        .cfg_i             (pmp_cfg_unp),
+        .addr_i            (pmp_addr_unp),
         .priv_i            (priv_i),
         .access_addr_i     (if_pmp_addr),
         .access_is_read_i  (1'b0),
@@ -542,8 +552,8 @@ module mmu (
     );
 
     pmp u_pmp_dm (
-        .cfg_i             (pmp_cfg_i),
-        .addr_i            (pmp_addr_i),
+        .cfg_i             (pmp_cfg_unp),
+        .addr_i            (pmp_addr_unp),
         .priv_i            (dm_eff_priv),
         .access_addr_i     (dm_pmp_addr),
         .access_is_read_i  (~dm_core_req_wen),

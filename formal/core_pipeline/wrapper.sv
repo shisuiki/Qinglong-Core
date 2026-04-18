@@ -52,6 +52,19 @@ module rvfi_wrapper (
     (* keep *) wire        commit_trap;
     (* keep *) wire [31:0] commit_cause;
 
+    // Auxiliary outputs (MMU/cache control) — the wrapper has no consumer
+    // for these in this config; wire them off so the port list is complete.
+    (* keep *) wire        icache_invalidate;
+    (* keep *) wire        mmu_sfence_vma;
+    (* keep *) wire [31:0] mmu_satp;
+    (* keep *) wire [1:0]  mmu_priv;
+    (* keep *) wire        mmu_mprv;
+    (* keep *) wire [1:0]  mmu_mpp;
+    (* keep *) wire        mmu_sum;
+    (* keep *) wire        mmu_mxr;
+    (* keep *) wire [15:0][7:0]  mmu_pmp_cfg;
+    (* keep *) wire [15:0][31:0] mmu_pmp_addr;
+
     core_pipeline uut (
         .clk(clock), .rst(reset),
 
@@ -87,6 +100,17 @@ module rvfi_wrapper (
         .commit_rd_data  (commit_rd_data),
         .commit_trap     (commit_trap),
         .commit_cause    (commit_cause),
+
+        .icache_invalidate (icache_invalidate),
+        .mmu_sfence_vma  (mmu_sfence_vma),
+        .mmu_satp        (mmu_satp),
+        .mmu_priv        (mmu_priv),
+        .mmu_mprv        (mmu_mprv),
+        .mmu_mpp         (mmu_mpp),
+        .mmu_sum         (mmu_sum),
+        .mmu_mxr         (mmu_mxr),
+        .mmu_pmp_cfg     (mmu_pmp_cfg),
+        .mmu_pmp_addr    (mmu_pmp_addr),
 
         `RVFI_CONN32
     );

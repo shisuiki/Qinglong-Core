@@ -96,8 +96,8 @@ module soc_top #(
     logic        mmu_mprv_w, mmu_sum_w, mmu_mxr_w;
 
     // PMP static config exported by CSR, consumed by MMU's PMP checker.
-    logic [7:0]  mmu_pmp_cfg_w  [0:15];
-    logic [31:0] mmu_pmp_addr_w [0:15];
+    logic [15:0][7:0]  mmu_pmp_cfg_w;
+    logic [15:0][31:0] mmu_pmp_addr_w;
 
     // Page-fault outputs from the MMU (Stage 6C-2d). Mutually exclusive with
     // the access-fault path.

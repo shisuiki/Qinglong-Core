@@ -68,8 +68,11 @@ module csr (
     // PMP state — 16 entries. cfg bytes come from pmpcfg0..3 (4 bytes per
     // CSR), addrs from pmpaddr0..15. Exposed flat for easy wiring into
     // the MMU's access-check path.
-    output logic [7:0]  pmp_cfg_out  [0:15],
-    output logic [31:0] pmp_addr_out [0:15]
+    // Packed 2D so Yosys/SBY accept the port list (unpacked port arrays
+    // aren't supported by the Verilog frontend). Indexable as pmp_cfg_out[i]
+    // / pmp_addr_out[i] the same way an unpacked array would be.
+    output logic [15:0][7:0]  pmp_cfg_out,
+    output logic [15:0][31:0] pmp_addr_out
 );
 
     // ------------- CSR storage -------------
@@ -144,15 +147,15 @@ module csr (
     // current value of pmpcfgN.
     function automatic [31:0] pmpcfg_write_mask(input [31:0] old_w,
                                                 input [31:0] wb_new);
-        logic [31:0] r;
-        r = 32'd0;
-        for (int b = 0; b < 4; b++) begin
-            if (old_w[b*8 + 7])
-                r[b*8 +: 8] = old_w[b*8  +: 8];
-            else
-                r[b*8 +: 8] = wb_new[b*8 +: 8];
+        begin
+            pmpcfg_write_mask = 32'd0;
+            for (int b = 0; b < 4; b++) begin
+                if (old_w[b*8 + 7])
+                    pmpcfg_write_mask[b*8 +: 8] = old_w[b*8  +: 8];
+                else
+                    pmpcfg_write_mask[b*8 +: 8] = wb_new[b*8 +: 8];
+            end
         end
-        return r;
     endfunction
 
     // Fan out PMP storage. Byte-unpack pmpcfg0..3 and pass pmpaddr through.

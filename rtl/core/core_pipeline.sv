@@ -86,8 +86,8 @@ module core_pipeline #(
     output logic [1:0]  mmu_mpp,
     output logic        mmu_sum,
     output logic        mmu_mxr,
-    output logic [7:0]  mmu_pmp_cfg  [0:15],
-    output logic [31:0] mmu_pmp_addr [0:15]
+    output logic [15:0][7:0]  mmu_pmp_cfg,
+    output logic [15:0][31:0] mmu_pmp_addr
 `ifdef RISCV_FORMAL
     ,`RVFI_OUTPUTS
 `endif
