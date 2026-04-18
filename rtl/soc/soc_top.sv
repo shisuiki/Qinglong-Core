@@ -81,6 +81,8 @@ module soc_top #(
 
     // FENCE.I → icache invalidate pulse. Only the pipeline core emits it; the
     // multicycle core doesn't pair with the icache in supported configs.
+    // The D-cache is write-through so memory is always current — no D-side
+    // flush is needed to pair with FENCE.I.
     logic icache_invalidate_w;
 
 `ifdef USE_PIPELINE_CORE
@@ -138,6 +140,19 @@ module soc_top #(
     wire dm_is_axi   = (dm_req_addr[31:28] == 4'hC);
     wire dm_is_mmio  = (dm_req_addr[31:16] == 16'hD058);
 
+    // Dmem-side signals for the SRAM region. Under USE_DCACHE they terminate
+    // at the D-cache's core side; otherwise they drive SRAM port B directly.
+    logic        dm_sram_req_valid;
+    logic [31:0] dm_sram_req_addr;
+    logic        dm_sram_req_wen;
+    logic [3:0]  dm_sram_req_wmask;
+    logic [31:0] dm_sram_req_wdata;
+    logic        dm_sram_req_ready;
+    logic        dm_sram_rsp_valid;
+    logic [31:0] dm_sram_rsp_rdata;
+    logic        dm_sram_rsp_fault;
+
+    // SRAM port B connections (downstream of the optional D-cache).
     logic        sram_b_req_valid;
     logic [31:0] sram_b_req_addr;
     logic        sram_b_req_wen;
@@ -168,11 +183,11 @@ module soc_top #(
     logic        axi_rsp_valid, axi_rsp_fault;
     logic [31:0] axi_rsp_rdata;
 
-    assign sram_b_req_valid = dm_req_valid && dm_is_sram;
-    assign sram_b_req_addr  = dm_req_addr;
-    assign sram_b_req_wen   = dm_req_wen;
-    assign sram_b_req_wmask = dm_req_wmask;
-    assign sram_b_req_wdata = dm_req_wdata;
+    assign dm_sram_req_valid = dm_req_valid && dm_is_sram;
+    assign dm_sram_req_addr  = dm_req_addr;
+    assign dm_sram_req_wen   = dm_req_wen;
+    assign dm_sram_req_wmask = dm_req_wmask;
+    assign dm_sram_req_wdata = dm_req_wdata;
 
     assign mmio_req_valid = dm_req_valid && dm_is_mmio;
     assign mmio_req_addr  = dm_req_addr;
@@ -192,18 +207,18 @@ module soc_top #(
     assign axi_req_wdata = dm_req_wdata;
     assign axi_req_wmask = dm_req_wmask;
 
-    assign dm_req_ready   = dm_is_sram  ? sram_b_req_ready
+    assign dm_req_ready   = dm_is_sram  ? dm_sram_req_ready
                           : dm_is_mmio  ? mmio_req_ready
                           : dm_is_clint ? clint_req_ready
                           : dm_is_axi   ? axi_req_ready
                           :               1'b1; // bad address: accept immediately, fault response
-    assign dm_rsp_valid   = sram_b_rsp_valid | mmio_rsp_valid | clint_rsp_valid | axi_rsp_valid | dmem_bad_rsp_valid;
-    assign dm_rsp_rdata   = sram_b_rsp_valid ? sram_b_rsp_rdata
-                          : mmio_rsp_valid   ? mmio_rsp_rdata
-                          : clint_rsp_valid  ? clint_rsp_rdata
-                          : axi_rsp_valid    ? axi_rsp_rdata
-                          :                    32'd0;
-    assign dm_rsp_fault   = mmio_rsp_fault | clint_rsp_fault | axi_rsp_fault | dmem_bad_rsp_valid;
+    assign dm_rsp_valid   = dm_sram_rsp_valid | mmio_rsp_valid | clint_rsp_valid | axi_rsp_valid | dmem_bad_rsp_valid;
+    assign dm_rsp_rdata   = dm_sram_rsp_valid ? dm_sram_rsp_rdata
+                          : mmio_rsp_valid    ? mmio_rsp_rdata
+                          : clint_rsp_valid   ? clint_rsp_rdata
+                          : axi_rsp_valid     ? axi_rsp_rdata
+                          :                     32'd0;
+    assign dm_rsp_fault   = dm_sram_rsp_fault | mmio_rsp_fault | clint_rsp_fault | axi_rsp_fault | dmem_bad_rsp_valid;
 
     // Bad-address path: latch a 1-cycle fault response (matches SRAM latency).
     logic dmem_bad_rsp_valid;
@@ -211,6 +226,39 @@ module soc_top #(
         if (rst) dmem_bad_rsp_valid <= 1'b0;
         else     dmem_bad_rsp_valid <= dm_req_valid && !dm_is_sram && !dm_is_mmio && !dm_is_clint && !dm_is_axi;
     end
+
+    // ---------- D-cache (optional, between DMEM SRAM region and port B) ----------
+    //
+    // Enabled with `define USE_DCACHE. Only the SRAM region goes through the
+    // cache; MMIO / CLINT / AXI remain uncached bypass paths.
+`ifdef USE_DCACHE
+    dcache #(
+        .LINE_BYTES(64), .SETS(64), .WAYS(4)
+    ) u_dcache (
+        .clk(clk), .rst(rst),
+
+        .core_req_valid(dm_sram_req_valid), .core_req_addr(dm_sram_req_addr),
+        .core_req_wen(dm_sram_req_wen),     .core_req_wdata(dm_sram_req_wdata),
+        .core_req_wmask(dm_sram_req_wmask), .core_req_ready(dm_sram_req_ready),
+        .core_rsp_valid(dm_sram_rsp_valid), .core_rsp_rdata(dm_sram_rsp_rdata),
+        .core_rsp_fault(dm_sram_rsp_fault),
+
+        .mem_req_valid(sram_b_req_valid), .mem_req_addr(sram_b_req_addr),
+        .mem_req_wen(sram_b_req_wen),     .mem_req_wmask(sram_b_req_wmask),
+        .mem_req_wdata(sram_b_req_wdata), .mem_req_ready(sram_b_req_ready),
+        .mem_rsp_valid(sram_b_rsp_valid), .mem_rsp_rdata(sram_b_rsp_rdata)
+    );
+`else
+    assign sram_b_req_valid  = dm_sram_req_valid;
+    assign sram_b_req_addr   = dm_sram_req_addr;
+    assign sram_b_req_wen    = dm_sram_req_wen;
+    assign sram_b_req_wmask  = dm_sram_req_wmask;
+    assign sram_b_req_wdata  = dm_sram_req_wdata;
+    assign dm_sram_req_ready = sram_b_req_ready;
+    assign dm_sram_rsp_valid = sram_b_rsp_valid;
+    assign dm_sram_rsp_rdata = sram_b_rsp_rdata;
+    assign dm_sram_rsp_fault = 1'b0;
+`endif
 
     // ---------- I-cache (optional, between core IF and SRAM port A) ----------
     //

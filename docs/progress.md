@@ -2,6 +2,37 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6B: Data cache (write-through, 4-way, 64 B lines, 16 KiB)
+
+### What shipped
+- **`rtl/cache/dcache.sv`** — 4-way set-associative D-cache, 64 B lines, 16 KiB. Same geometry and tag layout as the I-cache; interposes on the core's `dmem_*` bus for the SRAM region only (MMIO / CLINT / AXI remain uncached bypass paths). Byte-masked stores: `core_req_wmask[3:0]` merges into the cached line with one bit per byte; a separate write-port `always_ff` keeps the BRAM byte-WE inference clean on Xilinx.
+- **Write-through, write-allocate policy** — stores hit the cache *and* memory in the same transaction: write-hit fires a single-beat mem write via a small WT sub-FSM (`S_WT`), write-miss allocates the line via 16-beat fill and then fires the store to memory (`S_WT_MISS`). No dirty bits, no writeback walk, no flush path — the cache and memory are always in sync.
+- **`rtl/soc/soc_top.sv`** — splits the pre-cache DMEM SRAM path into `dm_sram_*` and the post-cache SRAM port B into `sram_b_*`; the `USE_DCACHE` ifdef drops the cache in between. The `else` branch is a straight passthrough so the baseline `CORE=pipeline` build is unchanged. MMIO/CLINT/AXI decodes are untouched — those regions are mandatorily uncacheable.
+- **`sim/Makefile`** — `DCACHE=1` flips `-DUSE_DCACHE`.
+
+### Tests (all PASS)
+- **Sim regression** (`make sim-all CORE=pipeline ICACHE=1 DCACHE=1`): 71/76 riscv-tests PASS — matches the cache-less baseline exactly (same 5 pre-existing out-of-scope failures: `ma_data`, `breakpoint`, `illegal`, `pmpaddr`, `zicntr`).
+- **Sim C regression** (`make sim-c CORE=pipeline ICACHE=1 DCACHE=1`): 7/7 PASS.
+- **Sim FreeRTOS** (`make run CORE=pipeline ICACHE=1 DCACHE=1 TEST=sw/freertos/freertos_demo.elf`): `PASS` + `MMIO exit 0` at cycle 112,582,997 (vs the Stage 6A I-cache-only baseline of 112,568,262 — within 0.013 %, so the extra store-path latency is effectively invisible on this workload).
+- **Formal**: not re-run — `rtl/core/core_pipeline.sv` is untouched in this stage (no new ports, no RVFI-visible changes). Stage 6A's 40/40 PASS still stands.
+
+### Why write-through
+The first cut was write-back with a FENCE.I-driven full-cache writeback walk (to keep memory current before the I-cache refill). Correct in principle, but the simulator's `tohost` poll reads SRAM via DPI backdoor and a WB cache strands the stores: every riscv-test timed out because the pass/fail banner never reached SRAM. Options evaluated: (1) keep WB and make sim DPI cache-aware, (2) special-case `tohost` as uncacheable, (3) switch to write-through. Option 3 is the smallest change with no test-harness hacks, and in a single-core single-issue pipeline the bandwidth cost of write-through is modest — SRAM accepts one store per cycle so the cache just adds a few cycles of latency at the boundary. If profiling later shows the store bandwidth is a real bottleneck, we can revisit with a store buffer on top of write-back (and a DPI-aware sim read path).
+- Consequence: FENCE.I no longer needs a D-side flush pair. The `dcache_flush` output prototyped on core_pipeline was removed; `icache_invalidate` alone is enough because memory is always current.
+
+### Design notes
+- **Mem-side shape mirrors sram_dp port B** (valid/ready req + rsp_valid for both reads *and* writes). The WT FSM waits for `mem_rsp_valid` before retiring `S_WT` — same shape as the core's `mem_ls_pending` logic, and it means a future AXI-Lite slave with back-pressure Just Works.
+- **Hit/miss latency**: read-hit is 2 cycles req→rsp (accept + lookup + done), matching the I-cache. Write-hit is 4 cycles (extra round-trip through `S_WT`). Read-miss is ~20 cycles. Write-miss is ~24 cycles (fill + one WT beat).
+- **Saved store merged into the filled target word** — during fill, when the target word arrives, the data_ram write applies `wmask` merge against `mem_rsp_rdata` in the same cycle so the cache shows the post-store state the moment the line is installed. The memory-side store then fires from `S_WT_MISS` to commit the write to SRAM.
+- **Single read port per way, muxed by state** — S_IDLE points at the incoming req for zero-cycle turnaround into S_LOOKUP; other states point at the saved line so `data_rd` stays stable until consumed.
+- **LR/SC/AMO** go through the cache as plain word loads/stores. The core still owns the reservation/atomicity logic (pipe drain on atomic, explicit monitor in core_pipeline).
+
+### Caveats / next
+- Write-through means every store is a mem-side beat. On a bus fabric with per-beat latency, this will hurt — the SRAM case is fine, AXI-Lite would need batching. Future upgrade path: write-back with a store buffer + sim DPI awareness.
+- D-cache is still physically-tagged (VIPT degenerate with identity mapping). Stage 6C MMU will add DTLB + ASID.
+- Cache is flat over the SRAM region; MMIO/CLINT/AXI remain uncached by address decode. Once more regions appear in Stage 7+, `dm_is_sram` becomes a "cacheable region" predicate.
+- Next up: **Stage 6C — MMU** (SV32, ITLB/DTLB, shared PTW, S-mode + CSRs + PMP) per `riscv_soc_plan.md`.
+
 ## 2026-04-18 — Stage 6A: Instruction cache (4-way, 64 B lines, 16 KiB)
 
 ### What shipped
