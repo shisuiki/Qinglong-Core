@@ -118,6 +118,10 @@ module core_pipeline #(
     logic        ex_is_wfi_q, ex_is_wfi_d;
     logic        ex_is_mul_q, ex_is_mul_d;
     logic        ex_is_div_q, ex_is_div_d;
+    logic        ex_is_lr_q, ex_is_lr_d;
+    logic        ex_is_sc_q, ex_is_sc_d;
+    logic        ex_is_amo_rmw_q, ex_is_amo_rmw_d;
+    logic [4:0]  ex_amo_funct5_q, ex_amo_funct5_d;
     logic        ex_is_serial_q, ex_is_serial_d;
     logic        ex_fetch_fault_q, ex_fetch_fault_d;
     logic        ex_illegal_q, ex_illegal_d;
@@ -141,6 +145,13 @@ module core_pipeline #(
     logic        mem_is_csr_q, mem_is_csr_d;
     logic        mem_is_mret_q, mem_is_mret_d;
     logic        mem_is_serial_q, mem_is_serial_d;
+    logic        mem_is_lr_q, mem_is_lr_d;
+    logic        mem_is_sc_q, mem_is_sc_d;
+    logic        mem_is_amo_rmw_q, mem_is_amo_rmw_d;
+    logic [4:0]  mem_amo_funct5_q, mem_amo_funct5_d;
+    logic [31:0] mem_amo_rs2_q, mem_amo_rs2_d;
+    logic        mem_amo_phase_q, mem_amo_phase_d;   // 0 = load beat, 1 = store beat
+    logic [31:0] mem_amo_old_q;                       // latched on AMO load rsp
     logic [11:0] mem_csr_addr_q, mem_csr_addr_d;
     logic [31:0] mem_csr_wdata_q, mem_csr_wdata_d;
     logic [2:0]  mem_csr_op_q, mem_csr_op_d;
@@ -179,6 +190,10 @@ module core_pipeline #(
     logic wb_redirect;
     logic [31:0] wb_redirect_pc;
     logic trap_pending_q, trap_pending_d;  // latch from EX detect → WB clear
+
+    // LR/SC reservation state
+    logic        resv_valid_q;
+    logic [29:0] resv_addr_q;   // word-aligned reservation addr (bits [31:2])
 
     // CSR-visible
     logic [31:0] mtvec_v, mepc_v;
@@ -326,15 +341,31 @@ module core_pipeline #(
     wire id_is_muldiv  = id_is_op && (id_funct7 == `F7_MULDIV);
     wire id_is_mul     = id_is_muldiv && !id_funct3[2];
     wire id_is_div     = id_is_muldiv &&  id_funct3[2];
+
+    // A-extension decode (funct3 must be 010 = word; funct5 in bits [31:27])
+    wire        id_is_amo_w  = id_is_amo && (id_funct3 == `F3_AMO_W);
+    wire [4:0]  id_amo_funct5 = id_instr_q[31:27];
+    wire id_is_lr      = id_is_amo_w && (id_amo_funct5 == `AMO_LR) && (id_rs2 == 5'd0);
+    wire id_is_sc      = id_is_amo_w && (id_amo_funct5 == `AMO_SC);
+    wire id_is_amo_rmw = id_is_amo_w && !id_is_lr && !id_is_sc &&
+                         ((id_amo_funct5 == `AMO_SWAP) || (id_amo_funct5 == `AMO_ADD) ||
+                          (id_amo_funct5 == `AMO_XOR)  || (id_amo_funct5 == `AMO_AND) ||
+                          (id_amo_funct5 == `AMO_OR)   || (id_amo_funct5 == `AMO_MIN) ||
+                          (id_amo_funct5 == `AMO_MAX)  || (id_amo_funct5 == `AMO_MINU) ||
+                          (id_amo_funct5 == `AMO_MAXU));
+    wire id_is_atomic  = id_is_lr || id_is_sc || id_is_amo_rmw;
+
     wire id_is_serial  = id_is_csr || id_is_mret || id_is_ecall ||
-                         id_is_ebreak || id_is_wfi || id_is_misc;
+                         id_is_ebreak || id_is_wfi || id_is_misc || id_is_atomic;
 
     wire id_rs1_used = id_is_jalr || id_is_branch || id_is_load || id_is_store ||
-                       id_is_op_imm || id_is_op ||
+                       id_is_op_imm || id_is_op || id_is_atomic ||
                        (id_is_csr && !id_funct3[2]);
-    wire id_rs2_used = id_is_branch || id_is_store || id_is_op;
+    wire id_rs2_used = id_is_branch || id_is_store || id_is_op ||
+                       id_is_sc || id_is_amo_rmw;
     wire id_writes_rd = (id_is_lui || id_is_auipc || id_is_jal || id_is_jalr ||
-                         id_is_load || id_is_op_imm || id_is_op || id_is_csr) &&
+                         id_is_load || id_is_op_imm || id_is_op || id_is_csr ||
+                         id_is_atomic) &&
                         (id_rd != 5'd0);
 
     // Immediates
@@ -352,8 +383,9 @@ module core_pipeline #(
             `OP_BRANCH, `OP_LOAD, `OP_STORE,
             `OP_OP_IMM, `OP_OP, `OP_MISC_MEM, `OP_SYSTEM:
                 id_illegal = 1'b0;
-            `OP_AMO:
-                id_illegal = 1'b1; // A-ext deferred
+            `OP_AMO: begin
+                if (!id_is_amo_w || !(id_is_lr || id_is_sc || id_is_amo_rmw)) id_illegal = 1'b1;
+            end
             default:
                 id_illegal = 1'b1;
         endcase
@@ -495,6 +527,10 @@ module core_pipeline #(
         ex_is_wfi_d      = ex_is_wfi_q;
         ex_is_mul_d      = ex_is_mul_q;
         ex_is_div_d      = ex_is_div_q;
+        ex_is_lr_d       = ex_is_lr_q;
+        ex_is_sc_d       = ex_is_sc_q;
+        ex_is_amo_rmw_d  = ex_is_amo_rmw_q;
+        ex_amo_funct5_d  = ex_amo_funct5_q;
         ex_is_serial_d   = ex_is_serial_q;
         ex_fetch_fault_d = ex_fetch_fault_q;
         ex_illegal_d     = ex_illegal_q;
@@ -520,6 +556,9 @@ module core_pipeline #(
                 ex_is_wfi_d      = 1'b0;
                 ex_is_mul_d      = 1'b0;
                 ex_is_div_d      = 1'b0;
+                ex_is_lr_d       = 1'b0;
+                ex_is_sc_d       = 1'b0;
+                ex_is_amo_rmw_d  = 1'b0;
                 ex_is_serial_d   = 1'b0;
                 ex_fetch_fault_d = 1'b0;
                 ex_illegal_d     = 1'b0;
@@ -552,6 +591,10 @@ module core_pipeline #(
                 ex_is_wfi_d      = id_is_wfi;
                 ex_is_mul_d      = id_is_mul;
                 ex_is_div_d      = id_is_div;
+                ex_is_lr_d       = id_is_lr;
+                ex_is_sc_d       = id_is_sc;
+                ex_is_amo_rmw_d  = id_is_amo_rmw;
+                ex_amo_funct5_d  = id_amo_funct5;
                 ex_is_serial_d   = id_is_serial;
                 ex_fetch_fault_d = id_fault_q;
                 ex_illegal_d     = id_illegal;
@@ -680,7 +723,8 @@ module core_pipeline #(
     wire [31:0] jal_target    = ex_pc_q + ex_imm_q;
     wire [31:0] jalr_target   = (ex_rs1_fwd + ex_imm_q) & ~32'd1;
     wire [31:0] branch_target = ex_pc_q + ex_imm_q;
-    wire [31:0] ls_addr       = ex_rs1_fwd + ex_imm_q;
+    wire ex_is_atomic_q = ex_is_lr_q || ex_is_sc_q || ex_is_amo_rmw_q;
+    wire [31:0] ls_addr       = ex_is_atomic_q ? ex_rs1_fwd : (ex_rs1_fwd + ex_imm_q);
     wire        ex_take_branch = ex_valid_q && ex_is_branch_q && ex_branch_taken;
     wire        ex_take_jal    = ex_valid_q && ex_is_jal_q;
     wire        ex_take_jalr   = ex_valid_q && ex_is_jalr_q;
@@ -706,6 +750,9 @@ module core_pipeline #(
                 `F3_LW, `F3_SW:          ex_ls_misaligned = (ls_addr[1:0] != 2'b00);
                 default:                 ex_ls_misaligned = 1'b0;
             endcase
+        end
+        if (ex_valid_q && ex_is_atomic_q) begin
+            ex_ls_misaligned = (ls_addr[1:0] != 2'b00);  // word-only
         end
     end
 
@@ -784,9 +831,9 @@ module core_pipeline #(
                 ex_trap = 1'b1; ex_cause = `CAUSE_BREAKPOINT;
             end else if (ex_target_misaligned) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_INSN_ADDR_MISALIGNED; ex_tval = ex_misaligned_target;
-            end else if (ex_is_load_q && ex_ls_misaligned) begin
+            end else if ((ex_is_load_q || ex_is_lr_q) && ex_ls_misaligned) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_LOAD_ADDR_MISALIGNED; ex_tval = ls_addr;
-            end else if (ex_is_store_q && ex_ls_misaligned) begin
+            end else if ((ex_is_store_q || ex_is_sc_q || ex_is_amo_rmw_q) && ex_ls_misaligned) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_STORE_ADDR_MISALIGNED; ex_tval = ls_addr;
             end
         end
@@ -827,6 +874,10 @@ module core_pipeline #(
     // ========================================================================
     // EX → EX/MEM
     // ========================================================================
+    // SC reservation hit detection (at EX time — SC is serial so the pipe has
+    // drained and resv_* is stable).
+    wire ex_sc_hit = resv_valid_q && (resv_addr_q == ls_addr[31:2]);
+
     always_comb begin
         mem_valid_d       = mem_valid_q;
         mem_pc_d          = mem_pc_q;
@@ -844,6 +895,12 @@ module core_pipeline #(
         mem_is_csr_d      = mem_is_csr_q;
         mem_is_mret_d     = mem_is_mret_q;
         mem_is_serial_d   = mem_is_serial_q;
+        mem_is_lr_d       = mem_is_lr_q;
+        mem_is_sc_d       = mem_is_sc_q;
+        mem_is_amo_rmw_d  = mem_is_amo_rmw_q;
+        mem_amo_funct5_d  = mem_amo_funct5_q;
+        mem_amo_rs2_d     = mem_amo_rs2_q;
+        mem_amo_phase_d   = mem_amo_phase_q;
         mem_csr_addr_d    = mem_csr_addr_q;
         mem_csr_wdata_d   = mem_csr_wdata_q;
         mem_csr_op_d      = mem_csr_op_q;
@@ -854,9 +911,17 @@ module core_pipeline #(
         mem_ls_pending_d  = mem_ls_pending_q;
 
         if (stall_mem) begin
-            // MEM is busy waiting on dmem_rsp — clear ls_pending once rsp lands.
+            // MEM is busy waiting on dmem_rsp. For AMO RMW phase 0, rsp ends
+            // the load beat and starts the store beat — keep ls_pending high
+            // and flip phase. Everything else (loads, stores, LR, SC-hit,
+            // AMO RMW phase 1) clears ls_pending on rsp.
             if (mem_valid_q && mem_ls_pending_q && dmem_rsp_valid) begin
-                mem_ls_pending_d = 1'b0;
+                if (mem_is_amo_rmw_q && (mem_amo_phase_q == 1'b0) && !dmem_rsp_fault) begin
+                    mem_amo_phase_d  = 1'b1;
+                    // ls_pending stays high for the store beat
+                end else begin
+                    mem_ls_pending_d = 1'b0;
+                end
             end
         end else begin
             if (stall_ex || !ex_valid_q) begin
@@ -867,17 +932,21 @@ module core_pipeline #(
                 mem_is_csr_d      = 1'b0;
                 mem_is_mret_d     = 1'b0;
                 mem_is_serial_d   = 1'b0;
+                mem_is_lr_d       = 1'b0;
+                mem_is_sc_d       = 1'b0;
+                mem_is_amo_rmw_d  = 1'b0;
                 mem_rd_wen_d      = 1'b0;
                 mem_has_result_d  = 1'b0;
                 mem_trap_d        = 1'b0;
                 mem_ls_pending_d  = 1'b0;
+                mem_amo_phase_d   = 1'b0;
             end else begin
                 mem_valid_d       = 1'b1;
                 mem_pc_d          = ex_pc_q;
                 mem_instr_d       = ex_instr_q;
                 mem_funct3_d      = ex_funct3_q;
                 mem_rd_d          = ex_rd_q;
-                mem_alu_y_d       = (ex_is_load_q || ex_is_store_q) ? ls_addr : ex_arith_wb;
+                mem_alu_y_d       = (ex_is_load_q || ex_is_store_q || ex_is_atomic_q) ? ls_addr : ex_arith_wb;
                 mem_store_wdata_d = store_wdata_w;
                 mem_store_wmask_d = store_wmask_w;
 
@@ -886,9 +955,17 @@ module core_pipeline #(
                 mem_is_csr_d      = ex_is_csr_q   && !ex_trap;
                 mem_is_mret_d     = ex_is_mret_q  && !ex_trap;
                 mem_is_serial_d   = ex_is_serial_q;
+                mem_is_lr_d       = ex_is_lr_q    && !ex_trap;
+                mem_is_sc_d       = ex_is_sc_q    && !ex_trap;
+                mem_is_amo_rmw_d  = ex_is_amo_rmw_q && !ex_trap;
+                mem_amo_funct5_d  = ex_amo_funct5_q;
+                mem_amo_rs2_d     = ex_rs2_fwd;
+                mem_amo_phase_d   = 1'b0;
                 mem_rd_wen_d      = ex_rd_wen_q   && !ex_trap;
 
-                mem_has_result_d  = ex_rd_wen_q && !ex_is_load_q && !ex_is_csr_q && !ex_trap;
+                mem_has_result_d  = ex_rd_wen_q && !ex_is_load_q && !ex_is_csr_q &&
+                                    !ex_is_lr_q && !ex_is_sc_q && !ex_is_amo_rmw_q &&
+                                    !ex_trap;
                 mem_result_d      = ex_arith_wb;
 
                 mem_csr_addr_d    = ex_csr_addr_q;
@@ -900,7 +977,22 @@ module core_pipeline #(
                 mem_cause_d       = ex_cause;
                 mem_tval_d        = ex_tval;
 
-                mem_ls_pending_d  = (ex_is_load_q || ex_is_store_q) && !ex_trap;
+                // ls_pending: needs a bus transaction?
+                //   - load / store / LR / AMO RMW : always
+                //   - SC: only if reservation hits; on miss we short-circuit
+                //     below to write rd=1 through the arith path.
+                if (!ex_trap && (ex_is_load_q || ex_is_store_q ||
+                                 ex_is_lr_q || ex_is_amo_rmw_q ||
+                                 (ex_is_sc_q && ex_sc_hit))) begin
+                    mem_ls_pending_d = 1'b1;
+                end else begin
+                    mem_ls_pending_d = 1'b0;
+                end
+                if (ex_is_sc_q && !ex_trap && !ex_sc_hit) begin
+                    // SC miss: no bus activity; write rd=1 via the arith path.
+                    mem_has_result_d = 1'b1;
+                    mem_result_d     = 32'd1;
+                end
             end
         end
 
@@ -912,25 +1004,52 @@ module core_pipeline #(
             mem_is_csr_d      = 1'b0;
             mem_is_mret_d     = 1'b0;
             mem_is_serial_d   = 1'b0;
+            mem_is_lr_d       = 1'b0;
+            mem_is_sc_d       = 1'b0;
+            mem_is_amo_rmw_d  = 1'b0;
             mem_rd_wen_d      = 1'b0;
             mem_has_result_d  = 1'b0;
             mem_trap_d        = 1'b0;
             mem_ls_pending_d  = 1'b0;
+            mem_amo_phase_d   = 1'b0;
         end
     end
 
     // ========================================================================
     // MEM stage — drive dmem_req / wait for dmem_rsp
     // ========================================================================
-    assign dmem_req_valid = mem_valid_q && (mem_is_load_q || mem_is_store_q) && mem_ls_pending_q && !mem_req_fired_q;
+    // AMO RMW store-beat data = op(amo_old_q, amo_rs2_q)
+    logic [31:0] amo_store_data;
+    always_comb begin
+        unique case (mem_amo_funct5_q)
+            `AMO_SWAP: amo_store_data = mem_amo_rs2_q;
+            `AMO_ADD:  amo_store_data = mem_amo_old_q + mem_amo_rs2_q;
+            `AMO_XOR:  amo_store_data = mem_amo_old_q ^ mem_amo_rs2_q;
+            `AMO_AND:  amo_store_data = mem_amo_old_q & mem_amo_rs2_q;
+            `AMO_OR:   amo_store_data = mem_amo_old_q | mem_amo_rs2_q;
+            `AMO_MIN:  amo_store_data = ($signed(mem_amo_old_q) < $signed(mem_amo_rs2_q)) ? mem_amo_old_q : mem_amo_rs2_q;
+            `AMO_MAX:  amo_store_data = ($signed(mem_amo_old_q) < $signed(mem_amo_rs2_q)) ? mem_amo_rs2_q : mem_amo_old_q;
+            `AMO_MINU: amo_store_data = (mem_amo_old_q < mem_amo_rs2_q) ? mem_amo_old_q : mem_amo_rs2_q;
+            `AMO_MAXU: amo_store_data = (mem_amo_old_q < mem_amo_rs2_q) ? mem_amo_rs2_q : mem_amo_old_q;
+            default:   amo_store_data = mem_amo_rs2_q;
+        endcase
+    end
+
+    wire mem_amo_store_beat = mem_is_amo_rmw_q && (mem_amo_phase_q == 1'b1);
+    wire mem_is_store_op    = mem_is_store_q || mem_is_sc_q || mem_amo_store_beat;
+    wire mem_has_bus_op     = mem_is_load_q || mem_is_store_q || mem_is_lr_q ||
+                              mem_is_sc_q   || mem_is_amo_rmw_q;
+
+    assign dmem_req_valid = mem_valid_q && mem_has_bus_op && mem_ls_pending_q && !mem_req_fired_q;
     assign dmem_req_addr  = {mem_alu_y_q[31:2], 2'b00};
-    assign dmem_req_wen   = mem_is_store_q;
-    assign dmem_req_wdata = mem_store_wdata_q;
-    assign dmem_req_wmask = mem_is_store_q ? mem_store_wmask_q
+    assign dmem_req_wen   = mem_is_store_op;
+    assign dmem_req_wdata = mem_amo_store_beat ? amo_store_data : mem_store_wdata_q;
+    assign dmem_req_wmask = mem_is_store_op ? ((mem_is_store_q && !mem_is_sc_q) ? mem_store_wmask_q : 4'b1111)
                           : (mem_funct3_q == `F3_LB || mem_funct3_q == `F3_LBU) ? 4'b0001
                           : (mem_funct3_q == `F3_LH || mem_funct3_q == `F3_LHU) ? 4'b0011
                           : 4'b1111;
-    assign dmem_req_size  = (mem_funct3_q == `F3_LB || mem_funct3_q == `F3_LBU || mem_funct3_q == `F3_SB) ? 2'b00
+    assign dmem_req_size  = (mem_is_lr_q || mem_is_sc_q || mem_is_amo_rmw_q) ? 2'b10
+                          : (mem_funct3_q == `F3_LB || mem_funct3_q == `F3_LBU || mem_funct3_q == `F3_SB) ? 2'b00
                           : (mem_funct3_q == `F3_LH || mem_funct3_q == `F3_LHU || mem_funct3_q == `F3_SH) ? 2'b01
                           : 2'b10;
     assign dmem_rsp_ready = 1'b1;
@@ -995,19 +1114,32 @@ module core_pipeline #(
         if (mem_valid_q && !stall_mem) begin
             wb_valid_d      = 1'b1;
             wb_is_serial_d  = mem_is_serial_q;
-            if (mem_is_load_q || mem_is_store_q) begin
+            // mem_has_result_q = 1 means the result was computed at EX (arith /
+            // SC-miss with rd=1) — take the arith path even if a bus-op flag is
+            // set for bookkeeping (e.g. mem_is_sc_q on miss).
+            if (mem_has_bus_op && !mem_has_result_q) begin
                 if (mem_bus_fault_q) begin
                     wb_trap_d   = 1'b1;
-                    wb_cause_d  = mem_is_store_q ? `CAUSE_STORE_ACCESS_FAULT : `CAUSE_LOAD_ACCESS_FAULT;
+                    wb_cause_d  = (mem_is_store_q || mem_is_sc_q || mem_is_amo_rmw_q)
+                                  ? `CAUSE_STORE_ACCESS_FAULT : `CAUSE_LOAD_ACCESS_FAULT;
                     wb_tval_d   = mem_alu_y_q;
                     wb_rd_wen_d = 1'b0;
+                end else if (mem_is_lr_q) begin
+                    wb_rd_wen_d = mem_rd_wen_q;
+                    wb_result_d = mem_load_data_q;  // LR returns loaded word
+                end else if (mem_is_sc_q) begin
+                    wb_rd_wen_d = mem_rd_wen_q;
+                    wb_result_d = 32'd0;            // SC hit: store completed → 0
+                end else if (mem_is_amo_rmw_q) begin
+                    wb_rd_wen_d = mem_rd_wen_q;
+                    wb_result_d = mem_amo_old_q;    // AMO returns pre-op value
                 end else begin
                     wb_rd_wen_d = mem_is_load_q && mem_rd_wen_q;
-                    wb_result_d = mem_load_data_q;  // latched at rsp cycle
+                    wb_result_d = mem_load_data_q;
                 end
             end else begin
                 wb_rd_wen_d  = mem_rd_wen_q;
-                wb_result_d  = mem_result_q;    // arith (ALU/MUL/DIV) — CSR handled below
+                wb_result_d  = mem_result_q;    // arith (ALU/MUL/DIV/SC-miss) — CSR below
                 wb_trap_d    = mem_trap_q;
                 wb_is_mret_d = mem_is_mret_q && !mem_trap_q;
                 wb_is_csr_d  = mem_is_csr_q  && !mem_trap_q;
@@ -1164,6 +1296,10 @@ module core_pipeline #(
             ex_is_wfi_q          <= 1'b0;
             ex_is_mul_q          <= 1'b0;
             ex_is_div_q          <= 1'b0;
+            ex_is_lr_q           <= 1'b0;
+            ex_is_sc_q           <= 1'b0;
+            ex_is_amo_rmw_q      <= 1'b0;
+            ex_amo_funct5_q      <= 5'd0;
             ex_is_serial_q       <= 1'b0;
             ex_fetch_fault_q     <= 1'b0;
             ex_illegal_q         <= 1'b0;
@@ -1186,6 +1322,15 @@ module core_pipeline #(
             mem_is_csr_q         <= 1'b0;
             mem_is_mret_q        <= 1'b0;
             mem_is_serial_q      <= 1'b0;
+            mem_is_lr_q          <= 1'b0;
+            mem_is_sc_q          <= 1'b0;
+            mem_is_amo_rmw_q     <= 1'b0;
+            mem_amo_funct5_q     <= 5'd0;
+            mem_amo_rs2_q        <= 32'd0;
+            mem_amo_phase_q      <= 1'b0;
+            mem_amo_old_q        <= 32'd0;
+            resv_valid_q         <= 1'b0;
+            resv_addr_q          <= 30'd0;
             mem_csr_addr_q       <= 12'd0;
             mem_csr_wdata_q      <= 32'd0;
             mem_csr_op_q         <= 3'd0;
@@ -1263,6 +1408,10 @@ module core_pipeline #(
             ex_is_wfi_q          <= ex_is_wfi_d;
             ex_is_mul_q          <= ex_is_mul_d;
             ex_is_div_q          <= ex_is_div_d;
+            ex_is_lr_q           <= ex_is_lr_d;
+            ex_is_sc_q           <= ex_is_sc_d;
+            ex_is_amo_rmw_q      <= ex_is_amo_rmw_d;
+            ex_amo_funct5_q      <= ex_amo_funct5_d;
             ex_is_serial_q       <= ex_is_serial_d;
             ex_fetch_fault_q     <= ex_fetch_fault_d;
             ex_illegal_q         <= ex_illegal_d;
@@ -1285,6 +1434,12 @@ module core_pipeline #(
             mem_is_csr_q         <= mem_is_csr_d;
             mem_is_mret_q        <= mem_is_mret_d;
             mem_is_serial_q      <= mem_is_serial_d;
+            mem_is_lr_q          <= mem_is_lr_d;
+            mem_is_sc_q          <= mem_is_sc_d;
+            mem_is_amo_rmw_q     <= mem_is_amo_rmw_d;
+            mem_amo_funct5_q     <= mem_amo_funct5_d;
+            mem_amo_rs2_q        <= mem_amo_rs2_d;
+            mem_amo_phase_q      <= mem_amo_phase_d;
             mem_csr_addr_q       <= mem_csr_addr_d;
             mem_csr_wdata_q      <= mem_csr_wdata_d;
             mem_csr_op_q         <= mem_csr_op_d;
@@ -1298,18 +1453,41 @@ module core_pipeline #(
             if (mem_valid_q && mem_ls_pending_q && dmem_rsp_valid) mem_req_fired_q <= 1'b0;
             if (wb_redirect)                             mem_req_fired_q <= 1'b0;
             // Latch load data / bus fault on rsp arrival; must be held until WB advance.
+            // For AMO RMW phase 0, latch into mem_amo_old_q instead of mem_load_data_q;
+            // bus fault latches normally. Phase 1's rsp only carries fault (it's a store).
             if (mem_valid_q && mem_ls_pending_q && dmem_rsp_valid) begin
                 mem_bus_fault_q <= dmem_rsp_fault;
-                mem_load_data_q <= load_aligned;
+                if (mem_is_amo_rmw_q && (mem_amo_phase_q == 1'b0)) begin
+                    mem_amo_old_q <= dmem_rsp_rdata; // word load, no alignment
+                end else if (mem_is_lr_q) begin
+                    mem_load_data_q <= dmem_rsp_rdata; // LR is always word
+                end else begin
+                    mem_load_data_q <= load_aligned;
+                end
             end
-            if (!stall_mem && mem_valid_q && (mem_is_load_q || mem_is_store_q)) begin
-                // Advancing to WB — clear latches for the next L/S.
+            if (!stall_mem && mem_valid_q && mem_has_bus_op) begin
+                // Advancing to WB — clear latches for the next op.
                 mem_bus_fault_q <= 1'b0;
                 mem_load_data_q <= 32'd0;
+                mem_amo_old_q   <= 32'd0;
             end
             if (wb_redirect) begin
                 mem_bus_fault_q <= 1'b0;
                 mem_load_data_q <= 32'd0;
+                mem_amo_old_q   <= 32'd0;
+            end
+
+            // Reservation state: LR arms on successful load rsp; SC and AMO-RMW
+            // commit clear it; traps clear it.
+            if (mem_valid_q && mem_is_lr_q && mem_ls_pending_q && dmem_rsp_valid && !dmem_rsp_fault) begin
+                resv_valid_q <= 1'b1;
+                resv_addr_q  <= mem_alu_y_q[31:2];
+            end
+            if (!stall_mem && mem_valid_q && (mem_is_sc_q || mem_is_amo_rmw_q)) begin
+                resv_valid_q <= 1'b0;
+            end
+            if (wb_redirect) begin
+                resv_valid_q <= 1'b0;
             end
 
             wb_valid_q           <= wb_valid_d;
