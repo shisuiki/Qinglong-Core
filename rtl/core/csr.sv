@@ -12,10 +12,10 @@
 // (csr_illegal) if priv_mode_q lies below the CSR's required privilege
 // (csr_addr[9:8] encodes the minimum priv per the RISC-V spec).
 //
-// Stage 6C-1 scope: exception delegation only. Interrupt delegation is still
-// a no-op (mideleg is writable but ignored by the take-interrupt path); irq
-// is always taken in M-mode. Tightens to full mideleg semantics with S-mode
-// interrupts once there's S-mode software to exercise them.
+// Exception delegation via medeleg, interrupt delegation via mideleg. An
+// interrupt routes to S-mode when the current priv is < M and mideleg[cause]
+// is set; otherwise M-mode takes it. Within each path, priority follows the
+// priv spec: MEI > MSI > MTI > SEI > SSI > STI.
 
 `include "defs.svh"
 
@@ -125,22 +125,39 @@ module csr (
     end
 
     // ------------- interrupt evaluation -------------
-    // For Stage 6C-1 we still only take interrupts in M-mode (mideleg unused
-    // by the take path). Once S-mode software exists we'll extend with a
-    // second irq path + delegation logic.
-    wire [31:0] mip_enabled = mip_live & mie_q & ~mideleg_q;
-    // Interrupt takeable at M when priv < M, or (priv == M && MIE).
+    // Two parallel paths per the priv spec:
+    //   M-path: bits NOT delegated via mideleg. M can take these whenever it's
+    //           in a lower priv, or in M with MIE set.
+    //   S-path: bits delegated via mideleg. Only S/U can take these (never M);
+    //           if in S we additionally gate on SIE.
+    // M always wins if both paths are live, then priority is MEI>MSI>MTI>
+    // SEI>SSI>STI within the winning path.
+    wire [31:0] mip_m_enabled = mip_live & mie_q & ~mideleg_q;
+    wire [31:0] mip_s_enabled = mip_live & mie_q &  mideleg_q;
     wire m_irq_enabled = (priv_mode_q != `PRV_M) ||
-                          (priv_mode_q == `PRV_M && mstatus_q[`MSTATUS_MIE_BIT]);
-    assign irq_pending = m_irq_enabled && (mip_enabled != 32'd0);
-    // RISC-V priv spec priority: MEI > MSI > MTI > SEI > SSI > STI.
+                         (priv_mode_q == `PRV_M && mstatus_q[`MSTATUS_MIE_BIT]);
+    wire s_irq_enabled = (priv_mode_q == `PRV_U) ||
+                         (priv_mode_q == `PRV_S && mstatus_q[`MSTATUS_SIE_BIT]);
+    wire m_irq_live = m_irq_enabled && (mip_m_enabled != 32'd0);
+    wire s_irq_live = s_irq_enabled && (mip_s_enabled != 32'd0);
+    assign irq_pending = m_irq_live || s_irq_live;
     always_comb begin
-        if      (mip_enabled[`MIP_MEI_BIT]) irq_cause = `CAUSE_IRQ_MEI;
-        else if (mip_enabled[`MIP_MSI_BIT]) irq_cause = `CAUSE_IRQ_MSI;
-        else if (mip_enabled[`MIP_MTI_BIT]) irq_cause = `CAUSE_IRQ_MTI;
-        else if (mip_enabled[`MIP_SEI_BIT]) irq_cause = `CAUSE_IRQ_SEI;
-        else if (mip_enabled[`MIP_SSI_BIT]) irq_cause = `CAUSE_IRQ_SSI;
-        else                                irq_cause = `CAUSE_IRQ_STI;
+        // M wins over S; within a path, follow spec priority MEI>MSI>MTI then
+        // SEI>SSI>STI. Since mideleg-writable bits are only SSI/STI/SEI, an
+        // M-path chosen this cycle will always land on MEI/MSI/MTI (the
+        // else-branches below are dead but kept for defense).
+        if (m_irq_live) begin
+            if      (mip_m_enabled[`MIP_MEI_BIT]) irq_cause = `CAUSE_IRQ_MEI;
+            else if (mip_m_enabled[`MIP_MSI_BIT]) irq_cause = `CAUSE_IRQ_MSI;
+            else if (mip_m_enabled[`MIP_MTI_BIT]) irq_cause = `CAUSE_IRQ_MTI;
+            else if (mip_m_enabled[`MIP_SEI_BIT]) irq_cause = `CAUSE_IRQ_SEI;
+            else if (mip_m_enabled[`MIP_SSI_BIT]) irq_cause = `CAUSE_IRQ_SSI;
+            else                                  irq_cause = `CAUSE_IRQ_STI;
+        end else begin
+            if      (mip_s_enabled[`MIP_SEI_BIT]) irq_cause = `CAUSE_IRQ_SEI;
+            else if (mip_s_enabled[`MIP_SSI_BIT]) irq_cause = `CAUSE_IRQ_SSI;
+            else                                  irq_cause = `CAUSE_IRQ_STI;
+        end
     end
 
     // ------------- sstatus / sie / sip views -------------

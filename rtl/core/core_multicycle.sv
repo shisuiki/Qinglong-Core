@@ -138,10 +138,11 @@ module core_multicycle #(
     wire is_ecall  = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h000);
     wire is_ebreak = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h001);
     wire is_mret   = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h302);
+    wire is_sret   = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h102);
     wire is_wfi    = is_system && (funct3 == `F3_PRIV) && (instr_q[31:20] == 12'h105);
     wire is_sfence = is_system && (funct3 == `F3_PRIV) && (instr_q[31:25] == 7'b0001001);
     wire is_csr    = is_system && (funct3 != `F3_PRIV);
-    wire is_priv_op = is_ecall | is_ebreak | is_mret | is_wfi;
+    wire is_priv_op = is_ecall | is_ebreak | is_mret | is_sret | is_wfi;
 
     // M-extension: funct7 == 0000001 with OP.  funct3[2] splits MUL-group (0) from DIV-group (1).
     wire is_muldiv      = is_op && (funct7 == `F7_MULDIV);
@@ -183,8 +184,7 @@ module core_multicycle #(
     logic        mstatus_tvm_v, mstatus_tsr_v;
     logic        irq_pending_v;
     logic [31:0] irq_cause_v;
-    // Multicycle core stays M-only; SRET is not decoded here. The unused
-    // S-mode outputs from csr.sv are bound to spare wires and left floating.
+    logic        do_sret;
     csr u_csr (
         .clk(clk), .rst(rst),
         .csr_en(csr_en), .csr_op(funct3), .csr_addr(instr_q[31:20]),
@@ -193,7 +193,7 @@ module core_multicycle #(
         .csr_rdata(csr_rdata), .csr_illegal(csr_illegal),
         .trap_take(trap_take), .trap_pc(trap_pc_in),
         .trap_cause(trap_cause_in), .trap_tval(trap_tval_in),
-        .mret(do_mret), .sret(1'b0),
+        .mret(do_mret), .sret(do_sret),
         .retire(commit_valid && !commit_trap),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
         .mtvec(mtvec_v), .stvec(stvec_v),
@@ -357,16 +357,22 @@ module core_multicycle #(
                 // TVM=1 traps S-mode SFENCE.VMA as illegal.
                 if (priv_mode_v == `PRV_S && mstatus_tvm_v) illegal_opcode = 1'b1;
             end else begin
-                // ECALL (0x000), EBREAK (0x001), MRET (0x302), WFI (0x105).
+                // ECALL (0x000), EBREAK (0x001), SRET (0x102), MRET (0x302),
+                // WFI (0x105).
                 case (instr_q[31:20])
-                    12'h000, 12'h001, 12'h302, 12'h105: /* ok */ ;
+                    12'h000, 12'h001, 12'h102, 12'h302, 12'h105: /* ok */ ;
                     default: illegal_opcode = 1'b1;
                 endcase
                 // rs1 and rd must be zero for these
                 if (rd_i != 5'd0 || rs1_i != 5'd0) illegal_opcode = 1'b1;
-                // MRET requires M-mode.
+                // MRET requires M-mode. SRET is illegal in U-mode; in S-mode
+                // it traps when TSR=1.
                 if (instr_q[31:20] == 12'h302 && priv_mode_v != `PRV_M)
                     illegal_opcode = 1'b1;
+                if (instr_q[31:20] == 12'h102) begin
+                    if (priv_mode_v == `PRV_U) illegal_opcode = 1'b1;
+                    if (priv_mode_v == `PRV_S && mstatus_tsr_v) illegal_opcode = 1'b1;
+                end
             end
         end
     end
@@ -572,6 +578,12 @@ module core_multicycle #(
                          : (state_q == S_FETCH && fetch_irq_trap)      ? 32'd0
                          :                                               pc_q;
     assign do_mret       = (state_q == S_EXEC) && is_mret && !exec_trap;
+    assign do_sret       = (state_q == S_EXEC) && is_sret && !exec_trap;
+
+    // trap_tvec routes to stvec when csr.sv signals delegation (priv < M and
+    // medeleg/mideleg[cause]), else mtvec. Evaluated the same cycle as
+    // trap_take so the state machine picks the right base.
+    wire [31:0] trap_tvec = trap_to_s_v ? stvec_v : mtvec_v;
 
     // =========================================================================
     // State machine — purely combinational drives of *_next and outputs
@@ -653,9 +665,9 @@ module core_multicycle #(
                     commit_cause   = irq_cause_v;
                     commit_pc      = pc_q;
                     commit_insn    = 32'h0;
-                    pc_d           = mtvec_v[0]
-                                   ? ({mtvec_v[31:2], 2'b00} + {26'd0, irq_cause_v[3:0], 2'b00})
-                                   : {mtvec_v[31:2], 2'b00};
+                    pc_d           = trap_tvec[0]
+                                   ? ({trap_tvec[31:2], 2'b00} + {26'd0, irq_cause_v[3:0], 2'b00})
+                                   : {trap_tvec[31:2], 2'b00};
                     state_d        = S_FETCH;
                 end else begin
                     ifetch_req_valid = 1'b1;
@@ -670,7 +682,7 @@ module core_multicycle #(
                                            : `CAUSE_INSN_ACCESS_FAULT;
                             commit_pc    = pc_q;
                             commit_insn  = 32'h0;
-                            pc_d         = {mtvec_v[31:2], 2'b00};
+                            pc_d         = {trap_tvec[31:2], 2'b00};
                             state_d      = S_FETCH;
                         end else begin
                             instr_d = ifetch_rsp_data;
@@ -691,7 +703,7 @@ module core_multicycle #(
                     commit_cause = exec_cause;
                     commit_pc    = pc_q;
                     commit_insn  = instr_q;
-                    pc_d         = {mtvec_v[31:2], 2'b00};
+                    pc_d         = {trap_tvec[31:2], 2'b00};
                     resv_valid_d = 1'b0;
                     state_d      = S_FETCH;
                 end else if (is_mret) begin
@@ -699,6 +711,12 @@ module core_multicycle #(
                     commit_pc    = pc_q;
                     commit_insn  = instr_q;
                     pc_d         = mepc_v;
+                    state_d      = S_FETCH;
+                end else if (is_sret) begin
+                    commit_valid = 1'b1;
+                    commit_pc    = pc_q;
+                    commit_insn  = instr_q;
+                    pc_d         = sepc_v;
                     state_d      = S_FETCH;
                 end else if (is_load || is_store) begin
                     dmem_req_valid = 1'b1;
@@ -846,7 +864,7 @@ module core_multicycle #(
                             : (is_store_op ? `CAUSE_STORE_ACCESS_FAULT : `CAUSE_LOAD_ACCESS_FAULT);
                         commit_pc    = pc_of_mem_q;
                         commit_insn  = instr_of_mem_q;
-                        pc_d         = {mtvec_v[31:2], 2'b00};
+                        pc_d         = {trap_tvec[31:2], 2'b00};
                         resv_valid_d = 1'b0;
                         is_lr_d      = 1'b0;
                         is_sc_d      = 1'b0;
@@ -917,7 +935,7 @@ module core_multicycle #(
                                        : `CAUSE_STORE_ACCESS_FAULT;
                         commit_pc    = pc_of_mem_q;
                         commit_insn  = instr_of_mem_q;
-                        pc_d         = {mtvec_v[31:2], 2'b00};
+                        pc_d         = {trap_tvec[31:2], 2'b00};
                         resv_valid_d = 1'b0;
                         is_rmw_d     = 1'b0;
                         state_d      = S_FETCH;

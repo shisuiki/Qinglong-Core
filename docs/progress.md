@@ -2,6 +2,24 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-5: S-mode interrupt delegation + multicycle SRET
+
+### What shipped
+- **S-mode interrupt take-path (`rtl/core/csr.sv`)**. Split the single `mip_enabled` into `mip_m_enabled` (non-delegated) and `mip_s_enabled` (delegated via mideleg). Two parallel enable gates: M-path fires when priv<M or (M && MIE); S-path fires when priv==U or (S && SIE). M wins if both are live; `irq_cause` picks from the winning path using priv-spec priority (MEI>MSI>MTI, then SEI>SSI>STI within each). `trap_to_s` was already correct — it now actually matters since delegated bits reach the take path.
+- **Multicycle trap routing to stvec (`rtl/core/core_multicycle.sv`)**. All 4 trap-dispatch sites (S_FETCH interrupt, S_FETCH fetch-fault, S_EXEC, S_MEM/AMO-wait bus-fault) used to hardcode `mtvec_v`. They now route through `trap_tvec = trap_to_s ? stvec_v : mtvec_v` so delegated traps actually land in S-mode. Vectored-mode offset follows the chosen base as well.
+- **Multicycle SRET decode + execution (`rtl/core/core_multicycle.sv`)**. Adds `is_sret` (funct12=0x102), wires `do_sret` into the CSR file (was tied low), and `pc_d = sepc_v` at SRET retire. ID illegal gates: SRET illegal in U-mode and in S-mode with TSR=1. This closes the long-standing multicycle residual called out in 6C-4: multicycle can now pass `rv32mi-p-illegal`.
+- **`sw/tests/asm/s_irq.S`** — end-to-end test for delegated S-mode interrupts. Sets mideleg[1]=SSI, pre-arms mip.SSIP, MRETs into S-mode with SIE=1, expects the core to take the pending interrupt via stvec (not mtvec) on the very first fetch at `post_mret`. Handler confirms scause=0x80000001, clears SSIP, writes a witness, and SRETs. mtvec is wired to a failure sentinel — if M takes the interrupt, the test immediately fails.
+
+### Tests
+- **`s_irq.elf`**: PASS on both cores (269 cycles pipeline, 253 cycles multicycle). Fails loudly if the interrupt routes through mtvec instead of stvec.
+- **Sim regression (multicycle)**: 73/76 → **74/76**. Newly-passing: `rv32mi-p-illegal` (enabled by SRET decode + stvec routing). Residuals stay at `ma_data` and `breakpoint`.
+- **Sim regression (pipeline)**: 74/76 unchanged.
+- **Other MMU tests** (`mmu_sv32`, `mmu_pagefault`, `mmu_ifetch`): PASS on both cores, unchanged cycle counts.
+
+### Residuals (deferred)
+- Interrupt path still doesn't plumb separate M/S `irq_cause` selection into `trap_cause_in` — we rely on the csr-side picking the right cause based on which enable fired. Fine for now; revisit if nested M/S interrupt races show up.
+- SFENCE.VMA still flushes the full TLB (no ASID, no per-VPN).
+
 ## 2026-04-18 — Stage 6C-2e: ifetch-translation test + multicycle S-mode hardening
 
 ### What shipped
