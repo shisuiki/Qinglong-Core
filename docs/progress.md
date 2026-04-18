@@ -2,6 +2,20 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-3e: formal-suite IRQ bubble fix
+
+### What shipped
+- **`rtl/core/core_pipeline.sv`**. The IRQ injection path parked the canonical NOP encoding `0x00000013` (= `addi x0, x0, 0`) in `id_instr_d` when stuffing a trap-carrying bubble at ID. riscv-formal's `insn_addi_ch0` check decoded the retirement's `rvfi_insn` as a valid ADDI (spec_valid=1) with spec_trap=0, then asserted `spec_trap == rvfi_trap` and failed against our rvfi_trap=1. Switch to `0x00000000` — opcode 0 matches no legal RV32 insn, so every insn spec sees spec_valid=0 and correctly skips the retirement. At EX the existing `ex_irq_q` priority already overrode any illegal-insn trap this would otherwise imply.
+- **`formal/core_pipeline/wrapper.sv`**. Updated in 6C-3d to wire the new MMU / PMP / icache_invalidate / mmu_sfence_vma ports that appeared on `core_pipeline` during Stage 6C-2+ but never got threaded into the formal wrapper.
+
+### Tests
+- **`insn_addi_ch0`**: FAIL → PASS.
+- **Full formal suite**: 40/40 PASS (was 39/40 before the fix).
+- Sim regression unchanged: 74/76 on both cores.
+
+### Why 6C-3e existed
+Formal wasn't rerun at each stage because until 6C-3d the wrapper wouldn't even compile under the new port shapes. Once 6C-3d restored buildability, the addi failure surfaced. The bug was latent since Stage 5 (IRQ injection used 0x13 all along) — 37/37 only passed back then because the solver hadn't explored a state that got an interrupt taken during an ADDI-compatible fetch.
+
 ## 2026-04-18 — Stage 6C-3c: PMP lock-bit write-side enforcement
 
 ### What shipped
