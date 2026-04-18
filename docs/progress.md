@@ -2,6 +2,28 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-2d: page-fault cause distinction
+
+### What shipped
+- **MMU now distinguishes page faults from access faults (`rtl/core/mmu.sv`, `rtl/soc/soc_top.sv`)**. Added `if_core_rsp_pagefault` / `dm_core_rsp_pagefault` outputs on the core-facing MMU interfaces; mutually exclusive with `rsp_fault`. TLB-deny and walk-result faults now pulse `rsp_pagefault=1, rsp_fault=0`. Downstream bus faults still come through as `rsp_fault=1, rsp_pagefault=0`. Bare-mode passthrough drives `rsp_pagefault=0`.
+- **Core mapping to PAGE_FAULT causes (`rtl/core/core_pipeline.sv`, `rtl/core/core_multicycle.sv`)**. Pipeline: added `ifetch_rsp_pagefault` / `dmem_rsp_pagefault` input ports, `id_pagefault_q` / `ex_fetch_pagefault_q` / `mem_bus_pagefault_q` propagate through the stages. At EX trap detection, ifetch pagefault routes to `CAUSE_INSN_PAGE_FAULT` (priority over the access-fault path). At WB, load/store bus op routes to `LOAD/STORE_PAGE_FAULT` before checking `mem_bus_fault_q`. Multicycle: same logic in the S_FETCH fetch-trap, S_MEM load/store-trap, and S_AMO_WAIT paths.
+- **Multicycle dmem_rsp_ready is now state-gated**. It was previously asserted unconditionally; with tlb_deny synthesizing a same-cycle pagefault rsp during S_EXEC, the always-1 rsp_ready would "consume" the rsp (from the MMU's perspective) without the core actually acting on it, and S_MEM would hang waiting for a rsp that had been dropped. Fix: `dmem_rsp_ready = (state_q == S_MEM) || (state_q == S_AMO_WAIT)`. The MMU's sticky fault-cache then holds the pagefault across the S_EXEC → S_MEM transition so S_MEM sees it.
+- **Formal wrapper plumbing (`formal/core_pipeline/wrapper.sv`)**. Added the two new pagefault inputs as symbolic rand regs; the existing "no faults, no IRQs for insn checks" assume block now also pins both pagefaults to 0 so the arith-insn checks stay bit-exact.
+- **New test: `sw/tests/asm/mmu_pagefault.S`**. Three fault cases chained via an mtvec handler: (a) store to a RO leaf (V|R|X|A, no W) → expect `STORE_PAGE_FAULT=15`; (b) load from an invalid leaf (V=0) → expect `LOAD_PAGE_FAULT=13`; (c) load from a U=1 leaf under S-mode, SUM=0 → expect `LOAD_PAGE_FAULT=13`. Handler checks `mcause` matches expectation and redirects `mepc` to the next case; after three successful returns we land at `pass`.
+
+### Tests
+- **MMU pagefault test**: PASS on multicycle (27,162 cycles) and pipeline+icache+dcache (41,956 cycles).
+- **MMU smoke test** (6C-2c carryover): PASS on both, unchanged.
+- **Sim regression** (`make sim-all` both cores, with and without caches): **73/76** — unchanged baseline.
+- **Sim C regression** (`make sim-c CORE=pipeline ICACHE=1 DCACHE=1`): 7/7 PASS.
+- **Sim FreeRTOS**: boots, `hello` / `blink` runs (bare mode unchanged).
+- **Formal**: not re-run. The wrapper pins both new pagefault inputs to 0 via existing assume, so the RVFI-visible behaviour is identical to 6C-2c for the insn-suite checks.
+
+### Residuals (deferred)
+- `rv32mi-p-illegal` still fails — needs mstatus.TVM / mstatus.TSR gating on SFENCE.VMA / satp / SRET from S-mode. That's a CSR-storage + illegal-decode change, separate sub-stage.
+- SFENCE.VMA still flushes everything (no rs1/rs2 fields).
+- Ifetch translation still exercised only indirectly. A real S-mode ifetch test (requires MRET drop + S-mode entry point) would pair well with `CAUSE_INSN_PAGE_FAULT`; haven't written one yet.
+
 ## 2026-04-18 — Stage 6C-2c: MMU TLB + SFENCE.VMA
 
 ### What shipped

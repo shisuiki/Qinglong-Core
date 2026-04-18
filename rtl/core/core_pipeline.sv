@@ -41,6 +41,7 @@ module core_pipeline #(
     input  logic        ifetch_rsp_valid,
     input  logic [31:0] ifetch_rsp_data,
     input  logic        ifetch_rsp_fault,
+    input  logic        ifetch_rsp_pagefault,
     output logic        ifetch_rsp_ready,
 
     // ---- dmem bus ----
@@ -54,6 +55,7 @@ module core_pipeline #(
     input  logic        dmem_rsp_valid,
     input  logic [31:0] dmem_rsp_rdata,
     input  logic        dmem_rsp_fault,
+    input  logic        dmem_rsp_pagefault,
     output logic        dmem_rsp_ready,
 
     // ---- ext interrupt lines ----
@@ -110,6 +112,7 @@ module core_pipeline #(
     logic [31:0] id_pc_q, id_pc_d;
     logic [31:0] id_instr_q, id_instr_d;
     logic        id_fault_q, id_fault_d;
+    logic        id_pagefault_q, id_pagefault_d;
     logic        id_irq_q, id_irq_d;
     logic [31:0] id_irq_cause_q, id_irq_cause_d;
 
@@ -152,6 +155,7 @@ module core_pipeline #(
     logic [4:0]  ex_amo_funct5_q, ex_amo_funct5_d;
     logic        ex_is_serial_q, ex_is_serial_d;
     logic        ex_fetch_fault_q, ex_fetch_fault_d;
+    logic        ex_fetch_pagefault_q, ex_fetch_pagefault_d;
     logic        ex_illegal_q, ex_illegal_d;
     logic        ex_irq_q, ex_irq_d;
     logic [31:0] ex_irq_cause_q, ex_irq_cause_d;
@@ -191,6 +195,7 @@ module core_pipeline #(
     logic        mem_ls_pending_q, mem_ls_pending_d;
     logic        mem_req_fired_q; // 1 once dmem_req was accepted; prevents re-issue
     logic        mem_bus_fault_q; // latched from dmem_rsp when it arrives
+    logic        mem_bus_pagefault_q; // latched: mmu-reported page fault (mutex w/ bus_fault)
     logic [31:0] mem_load_data_q; // latched from load rsp (aligned/ext)
 
     // MEM/WB
@@ -313,6 +318,7 @@ module core_pipeline #(
         id_pc_d        = id_pc_q;
         id_instr_d     = id_instr_q;
         id_fault_d     = id_fault_q;
+        id_pagefault_d = id_pagefault_q;
         id_irq_d       = id_irq_q;
         id_irq_cause_d = id_irq_cause_q;
 
@@ -329,6 +335,7 @@ module core_pipeline #(
                 id_pc_d        = pc_q;
                 id_instr_d     = 32'h0000_0013;
                 id_fault_d     = 1'b0;
+                id_pagefault_d = 1'b0;
                 id_irq_d       = 1'b1;
                 id_irq_cause_d = irq_cause_v;
             end else if (rsp_consumable) begin
@@ -336,6 +343,7 @@ module core_pipeline #(
                 id_pc_d        = fetch_inflight_pc_q;
                 id_instr_d     = ifetch_rsp_data;
                 id_fault_d     = ifetch_rsp_fault;
+                id_pagefault_d = ifetch_rsp_pagefault;
                 id_irq_d       = 1'b0;
                 id_irq_cause_d = 32'd0;
             end else begin
@@ -587,6 +595,7 @@ module core_pipeline #(
         ex_amo_funct5_d  = ex_amo_funct5_q;
         ex_is_serial_d   = ex_is_serial_q;
         ex_fetch_fault_d = ex_fetch_fault_q;
+        ex_fetch_pagefault_d = ex_fetch_pagefault_q;
         ex_illegal_d     = ex_illegal_q;
         ex_irq_d         = ex_irq_q;
         ex_irq_cause_d   = ex_irq_cause_q;
@@ -616,6 +625,7 @@ module core_pipeline #(
                 ex_is_amo_rmw_d  = 1'b0;
                 ex_is_serial_d   = 1'b0;
                 ex_fetch_fault_d = 1'b0;
+                ex_fetch_pagefault_d = 1'b0;
                 ex_illegal_d     = 1'b0;
                 ex_irq_d         = 1'b0;
             end else begin
@@ -653,6 +663,7 @@ module core_pipeline #(
                 ex_amo_funct5_d  = id_amo_funct5;
                 ex_is_serial_d   = id_is_serial;
                 ex_fetch_fault_d = id_fault_q;
+                ex_fetch_pagefault_d = id_pagefault_q;
                 ex_illegal_d     = id_illegal;
                 ex_irq_d         = id_irq_q;
                 ex_irq_cause_d   = id_irq_cause_q;
@@ -877,6 +888,8 @@ module core_pipeline #(
         if (ex_valid_q) begin
             if (ex_irq_q) begin
                 ex_trap = 1'b1; ex_cause = ex_irq_cause_q; ex_tval = 32'd0;
+            end else if (ex_fetch_pagefault_q) begin
+                ex_trap = 1'b1; ex_cause = `CAUSE_INSN_PAGE_FAULT; ex_tval = ex_pc_q;
             end else if (ex_fetch_fault_q) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_INSN_ACCESS_FAULT; ex_tval = ex_pc_q;
             end else if (ex_illegal_q) begin
@@ -1184,7 +1197,13 @@ module core_pipeline #(
             // SC-miss with rd=1) — take the arith path even if a bus-op flag is
             // set for bookkeeping (e.g. mem_is_sc_q on miss).
             if (mem_has_bus_op && !mem_has_result_q) begin
-                if (mem_bus_fault_q) begin
+                if (mem_bus_pagefault_q) begin
+                    wb_trap_d   = 1'b1;
+                    wb_cause_d  = (mem_is_store_q || mem_is_sc_q || mem_is_amo_rmw_q)
+                                  ? `CAUSE_STORE_PAGE_FAULT : `CAUSE_LOAD_PAGE_FAULT;
+                    wb_tval_d   = mem_alu_y_q;
+                    wb_rd_wen_d = 1'b0;
+                end else if (mem_bus_fault_q) begin
                     wb_trap_d   = 1'b1;
                     wb_cause_d  = (mem_is_store_q || mem_is_sc_q || mem_is_amo_rmw_q)
                                   ? `CAUSE_STORE_ACCESS_FAULT : `CAUSE_LOAD_ACCESS_FAULT;
@@ -1378,6 +1397,7 @@ module core_pipeline #(
             id_pc_q              <= 32'd0;
             id_instr_q           <= 32'h0000_0013;
             id_fault_q           <= 1'b0;
+            id_pagefault_q       <= 1'b0;
             id_irq_q             <= 1'b0;
             id_irq_cause_q       <= 32'd0;
 
@@ -1419,6 +1439,7 @@ module core_pipeline #(
             ex_amo_funct5_q      <= 5'd0;
             ex_is_serial_q       <= 1'b0;
             ex_fetch_fault_q     <= 1'b0;
+            ex_fetch_pagefault_q <= 1'b0;
             ex_illegal_q         <= 1'b0;
             ex_irq_q             <= 1'b0;
             ex_irq_cause_q       <= 32'd0;
@@ -1459,6 +1480,7 @@ module core_pipeline #(
             mem_ls_pending_q     <= 1'b0;
             mem_req_fired_q      <= 1'b0;
             mem_bus_fault_q      <= 1'b0;
+            mem_bus_pagefault_q  <= 1'b0;
             mem_load_data_q      <= 32'd0;
 
             wb_valid_q           <= 1'b0;
@@ -1493,6 +1515,7 @@ module core_pipeline #(
             id_pc_q              <= id_pc_d;
             id_instr_q           <= id_instr_d;
             id_fault_q           <= id_fault_d;
+            id_pagefault_q       <= id_pagefault_d;
             id_irq_q             <= id_irq_d;
             id_irq_cause_q       <= id_irq_cause_d;
 
@@ -1534,6 +1557,7 @@ module core_pipeline #(
             ex_amo_funct5_q      <= ex_amo_funct5_d;
             ex_is_serial_q       <= ex_is_serial_d;
             ex_fetch_fault_q     <= ex_fetch_fault_d;
+            ex_fetch_pagefault_q <= ex_fetch_pagefault_d;
             ex_illegal_q         <= ex_illegal_d;
             ex_irq_q             <= ex_irq_d;
             ex_irq_cause_q       <= ex_irq_cause_d;
@@ -1577,7 +1601,8 @@ module core_pipeline #(
             // For AMO RMW phase 0, latch into mem_amo_old_q instead of mem_load_data_q;
             // bus fault latches normally. Phase 1's rsp only carries fault (it's a store).
             if (mem_valid_q && mem_ls_pending_q && dmem_rsp_valid) begin
-                mem_bus_fault_q <= dmem_rsp_fault;
+                mem_bus_fault_q     <= dmem_rsp_fault;
+                mem_bus_pagefault_q <= dmem_rsp_pagefault;
                 if (mem_is_amo_rmw_q && (mem_amo_phase_q == 1'b0)) begin
                     mem_amo_old_q <= dmem_rsp_rdata; // word load, no alignment
                 end else if (mem_is_lr_q) begin
@@ -1588,14 +1613,16 @@ module core_pipeline #(
             end
             if (!stall_mem && mem_valid_q && mem_has_bus_op) begin
                 // Advancing to WB — clear latches for the next op.
-                mem_bus_fault_q <= 1'b0;
-                mem_load_data_q <= 32'd0;
-                mem_amo_old_q   <= 32'd0;
+                mem_bus_fault_q     <= 1'b0;
+                mem_bus_pagefault_q <= 1'b0;
+                mem_load_data_q     <= 32'd0;
+                mem_amo_old_q       <= 32'd0;
             end
             if (wb_redirect) begin
-                mem_bus_fault_q <= 1'b0;
-                mem_load_data_q <= 32'd0;
-                mem_amo_old_q   <= 32'd0;
+                mem_bus_fault_q     <= 1'b0;
+                mem_bus_pagefault_q <= 1'b0;
+                mem_load_data_q     <= 32'd0;
+                mem_amo_old_q       <= 32'd0;
             end
 
             // Reservation state: LR arms on successful load rsp; SC and AMO-RMW

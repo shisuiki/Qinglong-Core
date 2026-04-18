@@ -16,11 +16,13 @@ module rvfi_wrapper (
     (* keep *) `rvformal_rand_reg        ifetch_rsp_valid;
     (* keep *) `rvformal_rand_reg [31:0] ifetch_rsp_data;
     (* keep *) `rvformal_rand_reg        ifetch_rsp_fault;
+    (* keep *) `rvformal_rand_reg        ifetch_rsp_pagefault;
 
     (* keep *) `rvformal_rand_reg        dmem_req_ready;
     (* keep *) `rvformal_rand_reg        dmem_rsp_valid;
     (* keep *) `rvformal_rand_reg [31:0] dmem_rsp_rdata;
     (* keep *) `rvformal_rand_reg        dmem_rsp_fault;
+    (* keep *) `rvformal_rand_reg        dmem_rsp_pagefault;
 
     // Interrupts: leave them free for now. `insn` checks don't cover irq semantics
     // so it's fine if the solver flips them; they just become potential traps.
@@ -59,6 +61,7 @@ module rvfi_wrapper (
         .ifetch_rsp_valid (ifetch_rsp_valid),
         .ifetch_rsp_data  (ifetch_rsp_data),
         .ifetch_rsp_fault (ifetch_rsp_fault),
+        .ifetch_rsp_pagefault (ifetch_rsp_pagefault),
         .ifetch_rsp_ready (ifetch_rsp_ready),
 
         .dmem_req_valid   (dmem_req_valid),
@@ -71,6 +74,7 @@ module rvfi_wrapper (
         .dmem_rsp_valid   (dmem_rsp_valid),
         .dmem_rsp_rdata   (dmem_rsp_rdata),
         .dmem_rsp_fault   (dmem_rsp_fault),
+        .dmem_rsp_pagefault (dmem_rsp_pagefault),
         .dmem_rsp_ready   (dmem_rsp_ready),
 
         .ext_mti (ext_mti), .ext_msi (ext_msi), .ext_mei (ext_mei),
@@ -105,7 +109,9 @@ module rvfi_wrapper (
     // via ifetch_rsp_fault, masking the arith behaviour we're proving.
     always @* begin
         assume (!ifetch_rsp_fault);
+        assume (!ifetch_rsp_pagefault);
         assume (!dmem_rsp_fault);
+        assume (!dmem_rsp_pagefault);
         assume (!ext_mti);
         assume (!ext_msi);
         assume (!ext_mei);

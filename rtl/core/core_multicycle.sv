@@ -30,6 +30,7 @@ module core_multicycle #(
     input  logic        ifetch_rsp_valid,
     input  logic [31:0] ifetch_rsp_data,
     input  logic        ifetch_rsp_fault,
+    input  logic        ifetch_rsp_pagefault,
     output logic        ifetch_rsp_ready,
 
     // ---- dmem bus ----
@@ -43,6 +44,7 @@ module core_multicycle #(
     input  logic        dmem_rsp_valid,
     input  logic [31:0] dmem_rsp_rdata,
     input  logic        dmem_rsp_fault,
+    input  logic        dmem_rsp_pagefault,
     output logic        dmem_rsp_ready,
 
     // ---- external interrupt lines (M-mode) ----
@@ -601,7 +603,11 @@ module core_multicycle #(
         dmem_req_wdata = 32'd0;
         dmem_req_wmask = 4'b0000;
         dmem_req_size  = 2'b10;
-        dmem_rsp_ready = 1'b1;
+        // Only the states that actually consume a dmem response assert
+        // rsp_ready. Otherwise, the MMU's zero-latency tlb_deny (same-cycle
+        // pagefault rsp during S_EXEC) would handshake out and get dropped
+        // before S_MEM observes it.
+        dmem_rsp_ready = (state_q == S_MEM) || (state_q == S_AMO_WAIT);
 
         rf_wen = 1'b0;
         rf_rd  = 5'd0;
@@ -642,11 +648,13 @@ module core_multicycle #(
                     ifetch_req_valid = 1'b1;
                     ifetch_req_addr  = pc_q;
                     if (ifetch_rsp_valid) begin
-                        if (ifetch_rsp_fault) begin
+                        if (ifetch_rsp_fault || ifetch_rsp_pagefault) begin
                             // Fetch-fault trap: commit trap, redirect to mtvec.
                             commit_valid = 1'b1;
                             commit_trap  = 1'b1;
-                            commit_cause = `CAUSE_INSN_ACCESS_FAULT;
+                            commit_cause = ifetch_rsp_pagefault
+                                           ? `CAUSE_INSN_PAGE_FAULT
+                                           : `CAUSE_INSN_ACCESS_FAULT;
                             commit_pc    = pc_q;
                             commit_insn  = 32'h0;
                             pc_d         = {mtvec_v[31:2], 2'b00};
@@ -815,12 +823,14 @@ module core_multicycle #(
             // -------------------------------------------------------------
             S_MEM: begin
                 if (dmem_rsp_valid) begin
-                    if (dmem_rsp_fault) begin
+                    if (dmem_rsp_fault || dmem_rsp_pagefault) begin
+                        logic is_store_op;
+                        is_store_op = is_sc_q || is_rmw_q || !is_load_q;
                         commit_valid = 1'b1;
                         commit_trap  = 1'b1;
-                        commit_cause = (is_sc_q || is_rmw_q) ? `CAUSE_STORE_ACCESS_FAULT
-                                                             : (is_load_q ? `CAUSE_LOAD_ACCESS_FAULT
-                                                                          : `CAUSE_STORE_ACCESS_FAULT);
+                        commit_cause = dmem_rsp_pagefault
+                            ? (is_store_op ? `CAUSE_STORE_PAGE_FAULT : `CAUSE_LOAD_PAGE_FAULT)
+                            : (is_store_op ? `CAUSE_STORE_ACCESS_FAULT : `CAUSE_LOAD_ACCESS_FAULT);
                         commit_pc    = pc_of_mem_q;
                         commit_insn  = instr_of_mem_q;
                         pc_d         = {mtvec_v[31:2], 2'b00};
@@ -886,10 +896,12 @@ module core_multicycle #(
             // -------------------------------------------------------------
             S_AMO_WAIT: begin
                 if (dmem_rsp_valid) begin
-                    if (dmem_rsp_fault) begin
+                    if (dmem_rsp_fault || dmem_rsp_pagefault) begin
                         commit_valid = 1'b1;
                         commit_trap  = 1'b1;
-                        commit_cause = `CAUSE_STORE_ACCESS_FAULT;
+                        commit_cause = dmem_rsp_pagefault
+                                       ? `CAUSE_STORE_PAGE_FAULT
+                                       : `CAUSE_STORE_ACCESS_FAULT;
                         commit_pc    = pc_of_mem_q;
                         commit_insn  = instr_of_mem_q;
                         pc_d         = {mtvec_v[31:2], 2'b00};

@@ -95,6 +95,10 @@ module soc_top #(
     logic [1:0]  mmu_priv_w, mmu_mpp_w;
     logic        mmu_mprv_w, mmu_sum_w, mmu_mxr_w;
 
+    // Page-fault outputs from the MMU (Stage 6C-2d). Mutually exclusive with
+    // the access-fault path.
+    logic core_if_rsp_pagefault, core_dm_rsp_pagefault;
+
     // ---------- interrupt inputs from CLINT ----------
     logic clint_mti, clint_msi;
 
@@ -113,12 +117,14 @@ module soc_top #(
 
         .ifetch_req_valid(core_if_req_valid), .ifetch_req_addr(core_if_req_addr), .ifetch_req_ready(core_if_req_ready),
         .ifetch_rsp_valid(core_if_rsp_valid), .ifetch_rsp_data(core_if_rsp_data), .ifetch_rsp_fault(core_if_rsp_fault),
+        .ifetch_rsp_pagefault(core_if_rsp_pagefault),
         .ifetch_rsp_ready(core_if_rsp_ready),
 
         .dmem_req_valid(core_dm_req_valid), .dmem_req_addr(core_dm_req_addr), .dmem_req_wen(core_dm_req_wen),
         .dmem_req_wdata(core_dm_req_wdata), .dmem_req_wmask(core_dm_req_wmask), .dmem_req_size(core_dm_req_size),
         .dmem_req_ready(core_dm_req_ready),
         .dmem_rsp_valid(core_dm_rsp_valid), .dmem_rsp_rdata(core_dm_rsp_rdata), .dmem_rsp_fault(core_dm_rsp_fault),
+        .dmem_rsp_pagefault(core_dm_rsp_pagefault),
         .dmem_rsp_ready(core_dm_rsp_ready),
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
@@ -141,12 +147,14 @@ module soc_top #(
 
         .ifetch_req_valid(core_if_req_valid), .ifetch_req_addr(core_if_req_addr), .ifetch_req_ready(core_if_req_ready),
         .ifetch_rsp_valid(core_if_rsp_valid), .ifetch_rsp_data(core_if_rsp_data), .ifetch_rsp_fault(core_if_rsp_fault),
+        .ifetch_rsp_pagefault(core_if_rsp_pagefault),
         .ifetch_rsp_ready(core_if_rsp_ready),
 
         .dmem_req_valid(core_dm_req_valid), .dmem_req_addr(core_dm_req_addr), .dmem_req_wen(core_dm_req_wen),
         .dmem_req_wdata(core_dm_req_wdata), .dmem_req_wmask(core_dm_req_wmask), .dmem_req_size(core_dm_req_size),
         .dmem_req_ready(core_dm_req_ready),
         .dmem_rsp_valid(core_dm_rsp_valid), .dmem_rsp_rdata(core_dm_rsp_rdata), .dmem_rsp_fault(core_dm_rsp_fault),
+        .dmem_rsp_pagefault(core_dm_rsp_pagefault),
         .dmem_rsp_ready(core_dm_rsp_ready),
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
@@ -178,6 +186,7 @@ module soc_top #(
 
         .if_core_req_valid(core_if_req_valid), .if_core_req_addr(core_if_req_addr), .if_core_req_ready(core_if_req_ready),
         .if_core_rsp_valid(core_if_rsp_valid), .if_core_rsp_data(core_if_rsp_data), .if_core_rsp_fault(core_if_rsp_fault),
+        .if_core_rsp_pagefault(core_if_rsp_pagefault),
         .if_core_rsp_ready(core_if_rsp_ready),
 
         .if_ds_req_valid(if_req_valid), .if_ds_req_addr(if_req_addr), .if_ds_req_ready(if_req_ready),
@@ -189,7 +198,8 @@ module soc_top #(
         .dm_core_req_wmask(core_dm_req_wmask), .dm_core_req_size(core_dm_req_size),
         .dm_core_req_ready(core_dm_req_ready),
         .dm_core_rsp_valid(core_dm_rsp_valid), .dm_core_rsp_rdata(core_dm_rsp_rdata),
-        .dm_core_rsp_fault(core_dm_rsp_fault), .dm_core_rsp_ready(core_dm_rsp_ready),
+        .dm_core_rsp_fault(core_dm_rsp_fault), .dm_core_rsp_pagefault(core_dm_rsp_pagefault),
+        .dm_core_rsp_ready(core_dm_rsp_ready),
 
         .dm_ds_req_valid(dm_req_valid), .dm_ds_req_addr(dm_req_addr),
         .dm_ds_req_wen(dm_req_wen),     .dm_ds_req_wdata(dm_req_wdata),

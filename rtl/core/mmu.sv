@@ -57,12 +57,16 @@ module mmu (
     input  logic        sfence_vma_i,
 
     // --- ifetch core-facing (upstream) ---
+    // rsp_fault is a bus access fault (bare-mode access miss or downstream
+    // bus fault during a translated access). rsp_pagefault is a walk / TLB
+    // permission failure — the two are mutually exclusive.
     input  logic        if_core_req_valid,
     input  logic [31:0] if_core_req_addr,
     output logic        if_core_req_ready,
     output logic        if_core_rsp_valid,
     output logic [31:0] if_core_rsp_data,
     output logic        if_core_rsp_fault,
+    output logic        if_core_rsp_pagefault,
     input  logic        if_core_rsp_ready,
 
     // --- ifetch downstream ---
@@ -85,6 +89,7 @@ module mmu (
     output logic        dm_core_rsp_valid,
     output logic [31:0] dm_core_rsp_rdata,
     output logic        dm_core_rsp_fault,
+    output logic        dm_core_rsp_pagefault,
     input  logic        dm_core_rsp_ready,
 
     // --- dmem downstream ---
@@ -482,6 +487,7 @@ module mmu (
     wire if_fault_reply = xlate_if && if_xlate_valid_q &&  if_xlate_fault_q;
 
     always_comb begin
+        if_core_rsp_pagefault = 1'b0;
         if (!xlate_if) begin
             // Bare passthrough.
             if_ds_req_valid   = if_core_req_valid;
@@ -501,13 +507,14 @@ module mmu (
             if_core_rsp_fault = if_ds_rsp_fault;
             if_ds_rsp_ready   = if_core_rsp_ready;
         end else if (if_tlb_deny) begin
-            if_ds_req_valid   = 1'b0;
-            if_ds_req_addr    = 32'd0;
-            if_core_req_ready = 1'b1;
-            if_core_rsp_valid = 1'b1;
-            if_core_rsp_data  = 32'd0;
-            if_core_rsp_fault = 1'b1;
-            if_ds_rsp_ready   = 1'b1;
+            if_ds_req_valid       = 1'b0;
+            if_ds_req_addr        = 32'd0;
+            if_core_req_ready     = 1'b1;
+            if_core_rsp_valid     = 1'b1;
+            if_core_rsp_data      = 32'd0;
+            if_core_rsp_fault     = 1'b0;
+            if_core_rsp_pagefault = 1'b1;
+            if_ds_rsp_ready       = 1'b1;
         end else if (if_forward) begin
             if_ds_req_valid   = if_core_req_valid;
             if_ds_req_addr    = if_xlate_pa_q;
@@ -517,13 +524,14 @@ module mmu (
             if_core_rsp_fault = if_ds_rsp_fault;
             if_ds_rsp_ready   = if_core_rsp_ready;
         end else if (if_fault_reply) begin
-            if_ds_req_valid   = 1'b0;
-            if_ds_req_addr    = 32'd0;
-            if_core_req_ready = 1'b1;
-            if_core_rsp_valid = 1'b1;
-            if_core_rsp_data  = 32'd0;
-            if_core_rsp_fault = 1'b1;
-            if_ds_rsp_ready   = 1'b1;
+            if_ds_req_valid       = 1'b0;
+            if_ds_req_addr        = 32'd0;
+            if_core_req_ready     = 1'b1;
+            if_core_rsp_valid     = 1'b1;
+            if_core_rsp_data      = 32'd0;
+            if_core_rsp_fault     = 1'b0;
+            if_core_rsp_pagefault = 1'b1;
+            if_ds_rsp_ready       = 1'b1;
         end else begin
             if_ds_req_valid   = 1'b0;
             if_ds_req_addr    = 32'd0;
@@ -543,6 +551,7 @@ module mmu (
     wire dm_fault_reply = xlate_dm && dm_xlate_valid_q &&  dm_xlate_fault_q;
 
     always_comb begin
+        dm_core_rsp_pagefault = 1'b0;
         if (!xlate_dm) begin
             dm_ds_req_valid   = dm_core_req_valid;
             dm_ds_req_addr    = dm_core_req_addr;
@@ -568,17 +577,18 @@ module mmu (
             dm_core_rsp_fault = dm_ds_rsp_fault;
             dm_ds_rsp_ready   = dm_core_rsp_ready;
         end else if (dm_tlb_deny) begin
-            dm_ds_req_valid   = 1'b0;
-            dm_ds_req_addr    = 32'd0;
-            dm_ds_req_wen     = 1'b0;
-            dm_ds_req_wdata   = 32'd0;
-            dm_ds_req_wmask   = 4'd0;
-            dm_ds_req_size    = 2'd0;
-            dm_core_req_ready = 1'b1;
-            dm_core_rsp_valid = 1'b1;
-            dm_core_rsp_rdata = 32'd0;
-            dm_core_rsp_fault = 1'b1;
-            dm_ds_rsp_ready   = 1'b1;
+            dm_ds_req_valid       = 1'b0;
+            dm_ds_req_addr        = 32'd0;
+            dm_ds_req_wen         = 1'b0;
+            dm_ds_req_wdata       = 32'd0;
+            dm_ds_req_wmask       = 4'd0;
+            dm_ds_req_size        = 2'd0;
+            dm_core_req_ready     = 1'b1;
+            dm_core_rsp_valid     = 1'b1;
+            dm_core_rsp_rdata     = 32'd0;
+            dm_core_rsp_fault     = 1'b0;
+            dm_core_rsp_pagefault = 1'b1;
+            dm_ds_rsp_ready       = 1'b1;
         end else if (dm_forward) begin
             dm_ds_req_valid   = dm_core_req_valid;
             dm_ds_req_addr    = dm_xlate_pa_q;
@@ -592,17 +602,18 @@ module mmu (
             dm_core_rsp_fault = dm_ds_rsp_fault;
             dm_ds_rsp_ready   = dm_core_rsp_ready;
         end else if (dm_fault_reply) begin
-            dm_ds_req_valid   = 1'b0;
-            dm_ds_req_addr    = 32'd0;
-            dm_ds_req_wen     = 1'b0;
-            dm_ds_req_wdata   = 32'd0;
-            dm_ds_req_wmask   = 4'd0;
-            dm_ds_req_size    = 2'd0;
-            dm_core_req_ready = 1'b1;
-            dm_core_rsp_valid = 1'b1;
-            dm_core_rsp_rdata = 32'd0;
-            dm_core_rsp_fault = 1'b1;
-            dm_ds_rsp_ready   = 1'b1;
+            dm_ds_req_valid       = 1'b0;
+            dm_ds_req_addr        = 32'd0;
+            dm_ds_req_wen         = 1'b0;
+            dm_ds_req_wdata       = 32'd0;
+            dm_ds_req_wmask       = 4'd0;
+            dm_ds_req_size        = 2'd0;
+            dm_core_req_ready     = 1'b1;
+            dm_core_rsp_valid     = 1'b1;
+            dm_core_rsp_rdata     = 32'd0;
+            dm_core_rsp_fault     = 1'b0;
+            dm_core_rsp_pagefault = 1'b1;
+            dm_ds_rsp_ready       = 1'b1;
         end else begin
             dm_ds_req_valid   = 1'b0;
             dm_ds_req_addr    = 32'd0;
