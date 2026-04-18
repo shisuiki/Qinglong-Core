@@ -24,6 +24,9 @@
 // A-extension (LR/SC/AMO) stubbed as illegal for now — see task 5E.
 
 `include "defs.svh"
+`ifdef RISCV_FORMAL
+`include "rvfi_macros.vh"
+`endif
 
 module core_pipeline #(
     parameter logic [31:0] RESET_PC = `RESET_PC
@@ -67,6 +70,9 @@ module core_pipeline #(
     output logic [31:0] commit_rd_data,
     output logic        commit_trap,
     output logic [31:0] commit_cause
+`ifdef RISCV_FORMAL
+    ,`RVFI_OUTPUTS
+`endif
 );
 
     // ========================================================================
@@ -1513,5 +1519,9 @@ module core_pipeline #(
             trap_pending_q       <= trap_pending_d;
         end
     end
+
+`ifdef RISCV_FORMAL
+`include "core_pipeline_rvfi.svh"
+`endif
 
 endmodule
