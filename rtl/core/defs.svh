@@ -82,9 +82,16 @@
 `define F3_CSRRSI   3'b110
 `define F3_CSRRCI   3'b111
 
+// ---------- privilege levels (used in core and mstatus.MPP/SPP) ----------
+`define PRV_U 2'b00
+`define PRV_S 2'b01
+`define PRV_M 2'b11
+
 // ---------- CSR addresses we implement (M-mode) ----------
 `define CSR_MSTATUS   12'h300
 `define CSR_MISA      12'h301
+`define CSR_MEDELEG   12'h302
+`define CSR_MIDELEG   12'h303
 `define CSR_MIE       12'h304
 `define CSR_MTVEC     12'h305
 `define CSR_MSCRATCH  12'h340
@@ -101,6 +108,18 @@
 `define CSR_MARCHID   12'hF12
 `define CSR_MIMPID    12'hF13
 
+// ---------- CSR addresses we implement (S-mode) ----------
+`define CSR_SSTATUS   12'h100
+`define CSR_SIE       12'h104
+`define CSR_STVEC     12'h105
+`define CSR_SCOUNTEREN 12'h106
+`define CSR_SSCRATCH  12'h140
+`define CSR_SEPC      12'h141
+`define CSR_SCAUSE    12'h142
+`define CSR_STVAL     12'h143
+`define CSR_SIP       12'h144
+`define CSR_SATP      12'h180
+
 // ---------- mcause values (M-mode, high bit=0 → exception, 1 → interrupt) ----------
 `define CAUSE_INSN_ADDR_MISALIGNED  32'd0
 `define CAUSE_INSN_ACCESS_FAULT     32'd1
@@ -110,24 +129,49 @@
 `define CAUSE_LOAD_ACCESS_FAULT     32'd5
 `define CAUSE_STORE_ADDR_MISALIGNED 32'd6
 `define CAUSE_STORE_ACCESS_FAULT    32'd7
+`define CAUSE_ECALL_FROM_U          32'd8
+`define CAUSE_ECALL_FROM_S          32'd9
 `define CAUSE_ECALL_FROM_M          32'd11
+`define CAUSE_INSN_PAGE_FAULT       32'd12
+`define CAUSE_LOAD_PAGE_FAULT       32'd13
+`define CAUSE_STORE_PAGE_FAULT      32'd15
 
 // ---------- interrupt causes (mcause MSB=1) ----------
+`define CAUSE_IRQ_SSI               32'h8000_0001
 `define CAUSE_IRQ_MSI               32'h8000_0003
+`define CAUSE_IRQ_STI               32'h8000_0005
 `define CAUSE_IRQ_MTI               32'h8000_0007
+`define CAUSE_IRQ_SEI               32'h8000_0009
 `define CAUSE_IRQ_MEI               32'h8000_000B
 
 // ---------- mip/mie bit positions ----------
+`define MIP_SSI_BIT  1
 `define MIP_MSI_BIT  3
+`define MIP_STI_BIT  5
 `define MIP_MTI_BIT  7
+`define MIP_SEI_BIT  9
 `define MIP_MEI_BIT  11
 
-// ---------- mstatus bit layout (RV32 M-mode subset) ----------
-// bit 3 MIE, bit 7 MPIE, bits 12:11 MPP.
+// ---------- mstatus bit layout (RV32 M/S subset) ----------
+// bit 1 SIE, bit 3 MIE, bit 5 SPIE, bit 7 MPIE, bit 8 SPP, bits 12:11 MPP,
+// bit 17 MPRV, bit 18 SUM, bit 19 MXR, bit 22 TVM, bit 23 TW, bit 24 TSR.
+`define MSTATUS_SIE_BIT   1
 `define MSTATUS_MIE_BIT   3
+`define MSTATUS_SPIE_BIT  5
 `define MSTATUS_MPIE_BIT  7
+`define MSTATUS_SPP_BIT   8
 `define MSTATUS_MPP_LO    11
 `define MSTATUS_MPP_HI    12
+`define MSTATUS_MPRV_BIT  17
+`define MSTATUS_SUM_BIT   18
+`define MSTATUS_MXR_BIT   19
+`define MSTATUS_TVM_BIT   20
+`define MSTATUS_TW_BIT    21
+`define MSTATUS_TSR_BIT   22
+
+// ---------- sstatus is a subset-view of mstatus — these bits are visible ----------
+// SIE(1), SPIE(5), SPP(8), SUM(18), MXR(19). (Also SUM/MXR matter once MMU lands.)
+`define SSTATUS_MASK 32'h000C_0122
 
 // ---------- misc ----------
 `define RESET_PC     32'h8000_0000

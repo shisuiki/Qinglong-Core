@@ -163,9 +163,13 @@ module core_multicycle #(
     logic [31:0] trap_pc_in, trap_cause_in, trap_tval_in;
     logic        do_mret;
     logic [31:0] mtvec_v, mepc_v;
-    logic        mstatus_mie_v;
+    logic [31:0] stvec_v, sepc_v, satp_v;
+    logic [1:0]  priv_mode_v, mstatus_mpp_v;
+    logic        trap_to_s_v, sstatus_sum_v, mstatus_mxr_v, mstatus_mprv_v;
     logic        irq_pending_v;
     logic [31:0] irq_cause_v;
+    // Multicycle core stays M-only; SRET is not decoded here. The unused
+    // S-mode outputs from csr.sv are bound to spare wires and left floating.
     csr u_csr (
         .clk(clk), .rst(rst),
         .csr_en(csr_en), .csr_op(funct3), .csr_addr(instr_q[31:20]),
@@ -174,10 +178,17 @@ module core_multicycle #(
         .csr_rdata(csr_rdata), .csr_illegal(csr_illegal),
         .trap_take(trap_take), .trap_pc(trap_pc_in),
         .trap_cause(trap_cause_in), .trap_tval(trap_tval_in),
-        .mret(do_mret),
+        .mret(do_mret), .sret(1'b0),
         .retire(commit_valid && !commit_trap),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
-        .mtvec(mtvec_v), .mepc_out(mepc_v), .mstatus_mie(mstatus_mie_v),
+        .mtvec(mtvec_v), .stvec(stvec_v),
+        .mepc_out(mepc_v), .sepc_out(sepc_v),
+        .priv_mode(priv_mode_v), .trap_to_s(trap_to_s_v),
+        .satp_out(satp_v),
+        .sstatus_sum(sstatus_sum_v),
+        .mstatus_mxr(mstatus_mxr_v),
+        .mstatus_mprv(mstatus_mprv_v),
+        .mstatus_mpp(mstatus_mpp_v),
         .irq_pending(irq_pending_v), .irq_cause(irq_cause_v)
     );
 

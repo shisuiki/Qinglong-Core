@@ -124,6 +124,7 @@ module core_pipeline #(
     logic        ex_is_ecall_q, ex_is_ecall_d;
     logic        ex_is_ebreak_q, ex_is_ebreak_d;
     logic        ex_is_mret_q, ex_is_mret_d;
+    logic        ex_is_sret_q, ex_is_sret_d;
     logic        ex_is_wfi_q, ex_is_wfi_d;
     logic        ex_is_mul_q, ex_is_mul_d;
     logic        ex_is_div_q, ex_is_div_d;
@@ -153,6 +154,7 @@ module core_pipeline #(
     logic        mem_is_store_q, mem_is_store_d;
     logic        mem_is_csr_q, mem_is_csr_d;
     logic        mem_is_mret_q, mem_is_mret_d;
+    logic        mem_is_sret_q, mem_is_sret_d;
     logic        mem_is_serial_q, mem_is_serial_d;
     logic        mem_is_lr_q, mem_is_lr_d;
     logic        mem_is_sc_q, mem_is_sc_d;
@@ -184,6 +186,7 @@ module core_pipeline #(
     logic [31:0] wb_cause_q, wb_cause_d;
     logic [31:0] wb_tval_q, wb_tval_d;
     logic        wb_is_mret_q, wb_is_mret_d;
+    logic        wb_is_sret_q, wb_is_sret_d;
     logic        wb_is_csr_q, wb_is_csr_d;
     logic        wb_is_serial_q, wb_is_serial_d;
     logic [11:0] wb_csr_addr_q, wb_csr_addr_d;
@@ -206,6 +209,10 @@ module core_pipeline #(
 
     // CSR-visible
     logic [31:0] mtvec_v, mepc_v;
+    logic [31:0] stvec_v, sepc_v, satp_v;
+    logic [1:0]  priv_mode_v, mstatus_mpp_v;
+    logic        trap_to_s_v;
+    logic        sstatus_sum_v, mstatus_mxr_v, mstatus_mprv_v;
     logic        irq_pending_v;
     logic [31:0] irq_cause_v;
 
@@ -213,6 +220,7 @@ module core_pipeline #(
     logic        csr_en_wb;
     logic        trap_take_wb;
     logic        mret_wb;
+    logic        sret_wb;
     logic        retire_wb;
     logic [31:0] csr_rdata_w;
     logic        csr_illegal_w;
@@ -345,6 +353,7 @@ module core_pipeline #(
     wire id_is_ecall   = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h000);
     wire id_is_ebreak  = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h001);
     wire id_is_mret    = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h302);
+    wire id_is_sret    = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h102);
     wire id_is_wfi     = id_is_system && (id_funct3 == `F3_PRIV) && (id_instr_q[31:20] == 12'h105);
     wire id_is_csr     = id_is_system && (id_funct3 != `F3_PRIV);
     wire id_is_muldiv  = id_is_op && (id_funct7 == `F7_MULDIV);
@@ -364,7 +373,7 @@ module core_pipeline #(
                           (id_amo_funct5 == `AMO_MAXU));
     wire id_is_atomic  = id_is_lr || id_is_sc || id_is_amo_rmw;
 
-    wire id_is_serial  = id_is_csr || id_is_mret || id_is_ecall ||
+    wire id_is_serial  = id_is_csr || id_is_mret || id_is_sret || id_is_ecall ||
                          id_is_ebreak || id_is_wfi || id_is_misc || id_is_atomic;
 
     wire id_rs1_used = id_is_jalr || id_is_branch || id_is_load || id_is_store ||
@@ -422,7 +431,7 @@ module core_pipeline #(
         end
         if (id_is_system && (id_funct3 == `F3_PRIV)) begin
             unique case (id_instr_q[31:20])
-                12'h000, 12'h001, 12'h302, 12'h105: /* ok */ ;
+                12'h000, 12'h001, 12'h302, 12'h102, 12'h105: /* ok */ ;
                 default: id_illegal = 1'b1;
             endcase
             if (id_rd != 5'd0 || id_rs1 != 5'd0) id_illegal = 1'b1;
@@ -441,9 +450,12 @@ module core_pipeline #(
             // Non-implemented CSR addresses → illegal. Check against the CSR map.
             unique case (id_csr_addr)
                 `CSR_MSTATUS, `CSR_MISA, `CSR_MIE, `CSR_MIP,
+                `CSR_MEDELEG, `CSR_MIDELEG,
                 `CSR_MTVEC, `CSR_MSCRATCH, `CSR_MEPC, `CSR_MCAUSE, `CSR_MTVAL,
                 `CSR_MCYCLE, `CSR_MCYCLEH, `CSR_MINSTRET, `CSR_MINSTRETH,
-                `CSR_MHARTID, `CSR_MVENDORID, `CSR_MARCHID, `CSR_MIMPID:
+                `CSR_MHARTID, `CSR_MVENDORID, `CSR_MARCHID, `CSR_MIMPID,
+                `CSR_SSTATUS, `CSR_SIE, `CSR_SIP, `CSR_STVEC, `CSR_SCOUNTEREN,
+                `CSR_SSCRATCH, `CSR_SEPC, `CSR_SCAUSE, `CSR_STVAL, `CSR_SATP:
                     /* ok */ ;
                 default: id_illegal = 1'b1;
             endcase
@@ -533,6 +545,7 @@ module core_pipeline #(
         ex_is_ecall_d    = ex_is_ecall_q;
         ex_is_ebreak_d   = ex_is_ebreak_q;
         ex_is_mret_d     = ex_is_mret_q;
+        ex_is_sret_d     = ex_is_sret_q;
         ex_is_wfi_d      = ex_is_wfi_q;
         ex_is_mul_d      = ex_is_mul_q;
         ex_is_div_d      = ex_is_div_q;
@@ -562,6 +575,7 @@ module core_pipeline #(
                 ex_is_ecall_d    = 1'b0;
                 ex_is_ebreak_d   = 1'b0;
                 ex_is_mret_d     = 1'b0;
+                ex_is_sret_d     = 1'b0;
                 ex_is_wfi_d      = 1'b0;
                 ex_is_mul_d      = 1'b0;
                 ex_is_div_d      = 1'b0;
@@ -597,6 +611,7 @@ module core_pipeline #(
                 ex_is_ecall_d    = id_is_ecall;
                 ex_is_ebreak_d   = id_is_ebreak;
                 ex_is_mret_d     = id_is_mret;
+                ex_is_sret_d     = id_is_sret;
                 ex_is_wfi_d      = id_is_wfi;
                 ex_is_mul_d      = id_is_mul;
                 ex_is_div_d      = id_is_div;
@@ -835,7 +850,12 @@ module core_pipeline #(
             end else if (ex_illegal_q) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_ILLEGAL_INSN; ex_tval = ex_instr_q;
             end else if (ex_is_ecall_q) begin
-                ex_trap = 1'b1; ex_cause = `CAUSE_ECALL_FROM_M;
+                ex_trap = 1'b1;
+                unique case (priv_mode_v)
+                    `PRV_U:  ex_cause = `CAUSE_ECALL_FROM_U;
+                    `PRV_S:  ex_cause = `CAUSE_ECALL_FROM_S;
+                    default: ex_cause = `CAUSE_ECALL_FROM_M;
+                endcase
             end else if (ex_is_ebreak_q) begin
                 ex_trap = 1'b1; ex_cause = `CAUSE_BREAKPOINT;
             end else if (ex_target_misaligned) begin
@@ -903,6 +923,7 @@ module core_pipeline #(
         mem_is_store_d    = mem_is_store_q;
         mem_is_csr_d      = mem_is_csr_q;
         mem_is_mret_d     = mem_is_mret_q;
+        mem_is_sret_d     = mem_is_sret_q;
         mem_is_serial_d   = mem_is_serial_q;
         mem_is_lr_d       = mem_is_lr_q;
         mem_is_sc_d       = mem_is_sc_q;
@@ -940,6 +961,7 @@ module core_pipeline #(
                 mem_is_store_d    = 1'b0;
                 mem_is_csr_d      = 1'b0;
                 mem_is_mret_d     = 1'b0;
+                mem_is_sret_d     = 1'b0;
                 mem_is_serial_d   = 1'b0;
                 mem_is_lr_d       = 1'b0;
                 mem_is_sc_d       = 1'b0;
@@ -963,6 +985,7 @@ module core_pipeline #(
                 mem_is_store_d    = ex_is_store_q && !ex_trap;
                 mem_is_csr_d      = ex_is_csr_q   && !ex_trap;
                 mem_is_mret_d     = ex_is_mret_q  && !ex_trap;
+                mem_is_sret_d     = ex_is_sret_q  && !ex_trap;
                 mem_is_serial_d   = ex_is_serial_q;
                 mem_is_lr_d       = ex_is_lr_q    && !ex_trap;
                 mem_is_sc_d       = ex_is_sc_q    && !ex_trap;
@@ -1012,6 +1035,7 @@ module core_pipeline #(
             mem_is_store_d    = 1'b0;
             mem_is_csr_d      = 1'b0;
             mem_is_mret_d     = 1'b0;
+            mem_is_sret_d     = 1'b0;
             mem_is_serial_d   = 1'b0;
             mem_is_lr_d       = 1'b0;
             mem_is_sc_d       = 1'b0;
@@ -1113,6 +1137,7 @@ module core_pipeline #(
         wb_cause_d          = mem_cause_q;
         wb_tval_d           = mem_tval_q;
         wb_is_mret_d        = 1'b0;
+        wb_is_sret_d        = 1'b0;
         wb_is_csr_d         = 1'b0;
         wb_is_serial_d      = 1'b0;
         wb_csr_addr_d       = mem_csr_addr_q;
@@ -1151,6 +1176,7 @@ module core_pipeline #(
                 wb_result_d  = mem_result_q;    // arith (ALU/MUL/DIV/SC-miss) — CSR below
                 wb_trap_d    = mem_trap_q;
                 wb_is_mret_d = mem_is_mret_q && !mem_trap_q;
+                wb_is_sret_d = mem_is_sret_q && !mem_trap_q;
                 wb_is_csr_d  = mem_is_csr_q  && !mem_trap_q;
             end
         end
@@ -1160,6 +1186,7 @@ module core_pipeline #(
             wb_trap_d   = 1'b0;
             wb_rd_wen_d = 1'b0;
             wb_is_mret_d = 1'b0;
+            wb_is_sret_d = 1'b0;
             wb_is_csr_d = 1'b0;
             wb_is_serial_d = 1'b0;
         end
@@ -1181,6 +1208,7 @@ module core_pipeline #(
     assign csr_en_wb    = wb_valid_q && wb_is_csr_q && !wb_trap_q;
     assign trap_take_wb = wb_valid_q && wb_trap_q;
     assign mret_wb      = wb_valid_q && wb_is_mret_q && !wb_trap_q;
+    assign sret_wb      = wb_valid_q && wb_is_sret_q && !wb_trap_q;
     assign retire_wb    = wb_valid_q && !wb_trap_q;
 
     csr u_csr (
@@ -1196,11 +1224,17 @@ module core_pipeline #(
         .trap_pc(wb_pc_q),
         .trap_cause(wb_cause_q),
         .trap_tval(wb_tval_q),
-        .mret(mret_wb),
+        .mret(mret_wb), .sret(sret_wb),
         .retire(retire_wb),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
-        .mtvec(mtvec_v), .mepc_out(mepc_v),
-        .mstatus_mie(),
+        .mtvec(mtvec_v), .stvec(stvec_v),
+        .mepc_out(mepc_v), .sepc_out(sepc_v),
+        .priv_mode(priv_mode_v), .trap_to_s(trap_to_s_v),
+        .satp_out(satp_v),
+        .sstatus_sum(sstatus_sum_v),
+        .mstatus_mxr(mstatus_mxr_v),
+        .mstatus_mprv(mstatus_mprv_v),
+        .mstatus_mpp(mstatus_mpp_v),
         .irq_pending(irq_pending_v),
         .irq_cause(irq_cause_v)
     );
@@ -1244,16 +1278,25 @@ module core_pipeline #(
                          (wb_instr_q[6:0]   == `OP_MISC_MEM) &&
                          (wb_instr_q[14:12] == 3'b001);
 
-    // Redirect on trap, MRET, or FENCE.I
-    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_fence_i);
+    // Redirect on trap, MRET/SRET, or FENCE.I
+    assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_sret_q || wb_is_fence_i);
     always_comb begin
+        // Default: M-mode trap vector.
         wb_redirect_pc = {mtvec_v[31:2], 2'b00};
         if (wb_is_mret_q && !wb_trap_q) begin
             wb_redirect_pc = mepc_v;
+        end else if (wb_is_sret_q && !wb_trap_q) begin
+            wb_redirect_pc = sepc_v;
         end else if (wb_is_fence_i) begin
             wb_redirect_pc = wb_pc_q + 32'd4;
+        end else if (wb_trap_q && trap_to_s_v) begin
+            // Trap delegated to S-mode.
+            wb_redirect_pc = {stvec_v[31:2], 2'b00};
+            if (stvec_v[0] && wb_cause_q[31]) begin
+                wb_redirect_pc = {stvec_v[31:2], 2'b00} + {26'd0, wb_cause_q[3:0], 2'b00};
+            end
         end else if (wb_trap_q && mtvec_v[0] && wb_cause_q[31]) begin
-            // Vectored mode, interrupt: base + 4*cause_code[3:0]
+            // Vectored M-mode, interrupt: base + 4*cause_code[3:0]
             wb_redirect_pc = {mtvec_v[31:2], 2'b00} + {26'd0, wb_cause_q[3:0], 2'b00};
         end
     end
@@ -1318,6 +1361,7 @@ module core_pipeline #(
             ex_is_ecall_q        <= 1'b0;
             ex_is_ebreak_q       <= 1'b0;
             ex_is_mret_q         <= 1'b0;
+            ex_is_sret_q         <= 1'b0;
             ex_is_wfi_q          <= 1'b0;
             ex_is_mul_q          <= 1'b0;
             ex_is_div_q          <= 1'b0;
@@ -1346,6 +1390,7 @@ module core_pipeline #(
             mem_is_store_q       <= 1'b0;
             mem_is_csr_q         <= 1'b0;
             mem_is_mret_q        <= 1'b0;
+            mem_is_sret_q        <= 1'b0;
             mem_is_serial_q      <= 1'b0;
             mem_is_lr_q          <= 1'b0;
             mem_is_sc_q          <= 1'b0;
@@ -1378,6 +1423,7 @@ module core_pipeline #(
             wb_cause_q           <= 32'd0;
             wb_tval_q            <= 32'd0;
             wb_is_mret_q         <= 1'b0;
+            wb_is_sret_q         <= 1'b0;
             wb_is_csr_q          <= 1'b0;
             wb_is_serial_q       <= 1'b0;
             wb_csr_addr_q        <= 12'd0;
@@ -1430,6 +1476,7 @@ module core_pipeline #(
             ex_is_ecall_q        <= ex_is_ecall_d;
             ex_is_ebreak_q       <= ex_is_ebreak_d;
             ex_is_mret_q         <= ex_is_mret_d;
+            ex_is_sret_q         <= ex_is_sret_d;
             ex_is_wfi_q          <= ex_is_wfi_d;
             ex_is_mul_q          <= ex_is_mul_d;
             ex_is_div_q          <= ex_is_div_d;
@@ -1458,6 +1505,7 @@ module core_pipeline #(
             mem_is_store_q       <= mem_is_store_d;
             mem_is_csr_q         <= mem_is_csr_d;
             mem_is_mret_q        <= mem_is_mret_d;
+            mem_is_sret_q        <= mem_is_sret_d;
             mem_is_serial_q      <= mem_is_serial_d;
             mem_is_lr_q          <= mem_is_lr_d;
             mem_is_sc_q          <= mem_is_sc_d;
@@ -1525,6 +1573,7 @@ module core_pipeline #(
             wb_cause_q           <= wb_cause_d;
             wb_tval_q            <= wb_tval_d;
             wb_is_mret_q         <= wb_is_mret_d;
+            wb_is_sret_q         <= wb_is_sret_d;
             wb_is_csr_q          <= wb_is_csr_d;
             wb_is_serial_q       <= wb_is_serial_d;
             wb_csr_addr_q        <= wb_csr_addr_d;
