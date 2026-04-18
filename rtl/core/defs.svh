@@ -103,10 +103,40 @@
 `define CSR_MINSTRET  12'hB02
 `define CSR_MCYCLEH   12'hB80
 `define CSR_MINSTRETH 12'hB82
+// Unprivileged read-only aliases (Zicntr).
+`define CSR_CYCLE     12'hC00
+`define CSR_INSTRET   12'hC02
+`define CSR_CYCLEH    12'hC80
+`define CSR_INSTRETH  12'hC82
 `define CSR_MHARTID   12'hF14
 `define CSR_MVENDORID 12'hF11
 `define CSR_MARCHID   12'hF12
 `define CSR_MIMPID    12'hF13
+
+// ---------- CSR addresses we implement (PMP, M-mode) ----------
+// We back pmpcfg0..3 and pmpaddr0..15 with plain 32-bit R/W storage —
+// no enforcement yet (Stage 6C-3a). Enough to pass rv32mi-p-pmpaddr,
+// which is a register-behavior probe (no real access checks).
+`define CSR_PMPCFG0   12'h3A0
+`define CSR_PMPCFG1   12'h3A1
+`define CSR_PMPCFG2   12'h3A2
+`define CSR_PMPCFG3   12'h3A3
+`define CSR_PMPADDR0  12'h3B0
+`define CSR_PMPADDR1  12'h3B1
+`define CSR_PMPADDR2  12'h3B2
+`define CSR_PMPADDR3  12'h3B3
+`define CSR_PMPADDR4  12'h3B4
+`define CSR_PMPADDR5  12'h3B5
+`define CSR_PMPADDR6  12'h3B6
+`define CSR_PMPADDR7  12'h3B7
+`define CSR_PMPADDR8  12'h3B8
+`define CSR_PMPADDR9  12'h3B9
+`define CSR_PMPADDR10 12'h3BA
+`define CSR_PMPADDR11 12'h3BB
+`define CSR_PMPADDR12 12'h3BC
+`define CSR_PMPADDR13 12'h3BD
+`define CSR_PMPADDR14 12'h3BE
+`define CSR_PMPADDR15 12'h3BF
 
 // ---------- CSR addresses we implement (S-mode) ----------
 `define CSR_SSTATUS   12'h100

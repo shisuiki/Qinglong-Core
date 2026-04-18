@@ -453,9 +453,15 @@ module core_pipeline #(
                 `CSR_MEDELEG, `CSR_MIDELEG,
                 `CSR_MTVEC, `CSR_MSCRATCH, `CSR_MEPC, `CSR_MCAUSE, `CSR_MTVAL,
                 `CSR_MCYCLE, `CSR_MCYCLEH, `CSR_MINSTRET, `CSR_MINSTRETH,
+                `CSR_CYCLE,  `CSR_CYCLEH,  `CSR_INSTRET,  `CSR_INSTRETH,
                 `CSR_MHARTID, `CSR_MVENDORID, `CSR_MARCHID, `CSR_MIMPID,
                 `CSR_SSTATUS, `CSR_SIE, `CSR_SIP, `CSR_STVEC, `CSR_SCOUNTEREN,
-                `CSR_SSCRATCH, `CSR_SEPC, `CSR_SCAUSE, `CSR_STVAL, `CSR_SATP:
+                `CSR_SSCRATCH, `CSR_SEPC, `CSR_SCAUSE, `CSR_STVAL, `CSR_SATP,
+                `CSR_PMPCFG0,  `CSR_PMPCFG1,  `CSR_PMPCFG2,  `CSR_PMPCFG3,
+                `CSR_PMPADDR0, `CSR_PMPADDR1, `CSR_PMPADDR2, `CSR_PMPADDR3,
+                `CSR_PMPADDR4, `CSR_PMPADDR5, `CSR_PMPADDR6, `CSR_PMPADDR7,
+                `CSR_PMPADDR8, `CSR_PMPADDR9, `CSR_PMPADDR10, `CSR_PMPADDR11,
+                `CSR_PMPADDR12, `CSR_PMPADDR13, `CSR_PMPADDR14, `CSR_PMPADDR15:
                     /* ok */ ;
                 default: id_illegal = 1'b1;
             endcase

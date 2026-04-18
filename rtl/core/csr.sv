@@ -85,6 +85,11 @@ module csr (
     logic [63:0] minstret_q;
     logic [1:0]  priv_mode_q;
 
+    // PMP registers: 4 pmpcfg and 16 pmpaddr. Storage-only for now (Stage 6C-3a);
+    // no access-fault path yet. Sized/named for easy expansion to enforcement.
+    logic [31:0] pmpcfg_q  [0:3];
+    logic [31:0] pmpaddr_q [0:15];
+
     // Read-only CSRs (constants)
     // MISA: MXL=01 (RV32) | S (18) | I (8). No A/M bits advertised (kept as before).
     localparam logic [31:0] MISA_CONST     = 32'h4004_0100;
@@ -160,6 +165,10 @@ module csr (
             `CSR_MCYCLEH:   read_value = mcycle_q[63:32];
             `CSR_MINSTRET:  read_value = minstret_q[31:0];
             `CSR_MINSTRETH: read_value = minstret_q[63:32];
+            `CSR_CYCLE:     read_value = mcycle_q[31:0];
+            `CSR_CYCLEH:    read_value = mcycle_q[63:32];
+            `CSR_INSTRET:   read_value = minstret_q[31:0];
+            `CSR_INSTRETH:  read_value = minstret_q[63:32];
             `CSR_MHARTID:   read_value = MHARTID_CONST;
             `CSR_MVENDORID: read_value = MVENDOR_CONST;
             `CSR_MARCHID:   read_value = MARCH_CONST;
@@ -175,6 +184,27 @@ module csr (
             `CSR_SCAUSE:    read_value = scause_q;
             `CSR_STVAL:     read_value = stval_q;
             `CSR_SATP:      read_value = satp_q;
+            // PMP
+            `CSR_PMPCFG0:   read_value = pmpcfg_q[0];
+            `CSR_PMPCFG1:   read_value = pmpcfg_q[1];
+            `CSR_PMPCFG2:   read_value = pmpcfg_q[2];
+            `CSR_PMPCFG3:   read_value = pmpcfg_q[3];
+            `CSR_PMPADDR0:  read_value = pmpaddr_q[0];
+            `CSR_PMPADDR1:  read_value = pmpaddr_q[1];
+            `CSR_PMPADDR2:  read_value = pmpaddr_q[2];
+            `CSR_PMPADDR3:  read_value = pmpaddr_q[3];
+            `CSR_PMPADDR4:  read_value = pmpaddr_q[4];
+            `CSR_PMPADDR5:  read_value = pmpaddr_q[5];
+            `CSR_PMPADDR6:  read_value = pmpaddr_q[6];
+            `CSR_PMPADDR7:  read_value = pmpaddr_q[7];
+            `CSR_PMPADDR8:  read_value = pmpaddr_q[8];
+            `CSR_PMPADDR9:  read_value = pmpaddr_q[9];
+            `CSR_PMPADDR10: read_value = pmpaddr_q[10];
+            `CSR_PMPADDR11: read_value = pmpaddr_q[11];
+            `CSR_PMPADDR12: read_value = pmpaddr_q[12];
+            `CSR_PMPADDR13: read_value = pmpaddr_q[13];
+            `CSR_PMPADDR14: read_value = pmpaddr_q[14];
+            `CSR_PMPADDR15: read_value = pmpaddr_q[15];
             default: begin
                 read_value = 32'd0;
                 addr_valid = 1'b0;
@@ -254,6 +284,8 @@ module csr (
             mcycle_q    <= 64'd0;
             minstret_q  <= 64'd0;
             priv_mode_q <= `PRV_M;
+            for (int i = 0; i < 4;  i++) pmpcfg_q[i]  <= 32'd0;
+            for (int i = 0; i < 16; i++) pmpaddr_q[i] <= 32'd0;
         end else begin
             // Free-running counters (but SW writes win against the tick).
             if (!(do_write && (csr_addr == `CSR_MCYCLE   || csr_addr == `CSR_MCYCLEH)))
@@ -336,6 +368,27 @@ module csr (
                     `CSR_SCAUSE:    scause_q   <= new_val;
                     `CSR_STVAL:     stval_q    <= new_val;
                     `CSR_SATP:      satp_q     <= new_val;
+                    // PMP storage — no lock enforcement yet.
+                    `CSR_PMPCFG0:   pmpcfg_q[0]  <= new_val;
+                    `CSR_PMPCFG1:   pmpcfg_q[1]  <= new_val;
+                    `CSR_PMPCFG2:   pmpcfg_q[2]  <= new_val;
+                    `CSR_PMPCFG3:   pmpcfg_q[3]  <= new_val;
+                    `CSR_PMPADDR0:  pmpaddr_q[0]  <= new_val;
+                    `CSR_PMPADDR1:  pmpaddr_q[1]  <= new_val;
+                    `CSR_PMPADDR2:  pmpaddr_q[2]  <= new_val;
+                    `CSR_PMPADDR3:  pmpaddr_q[3]  <= new_val;
+                    `CSR_PMPADDR4:  pmpaddr_q[4]  <= new_val;
+                    `CSR_PMPADDR5:  pmpaddr_q[5]  <= new_val;
+                    `CSR_PMPADDR6:  pmpaddr_q[6]  <= new_val;
+                    `CSR_PMPADDR7:  pmpaddr_q[7]  <= new_val;
+                    `CSR_PMPADDR8:  pmpaddr_q[8]  <= new_val;
+                    `CSR_PMPADDR9:  pmpaddr_q[9]  <= new_val;
+                    `CSR_PMPADDR10: pmpaddr_q[10] <= new_val;
+                    `CSR_PMPADDR11: pmpaddr_q[11] <= new_val;
+                    `CSR_PMPADDR12: pmpaddr_q[12] <= new_val;
+                    `CSR_PMPADDR13: pmpaddr_q[13] <= new_val;
+                    `CSR_PMPADDR14: pmpaddr_q[14] <= new_val;
+                    `CSR_PMPADDR15: pmpaddr_q[15] <= new_val;
                     default: /* no write */ ;
                 endcase
             end
