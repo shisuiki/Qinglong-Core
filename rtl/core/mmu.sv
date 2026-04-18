@@ -241,8 +241,11 @@ module mmu (
 
             PTW_L1_REQ: begin
                 ptw_req_valid = 1'b1;
-                // satp.PPN*4096 + VPN[1]*4
-                ptw_req_addr  = {satp_i[21:0], 10'd0} + {20'd0, ptw_va_q[31:22], 2'b00};
+                // satp.PPN*4096 + VPN[1]*4.
+                // {ppn[21:0], 12'd0} is 34 bits; Verilog truncates to 32 on
+                // assign — the top 2 bits of satp.PPN fall off (we only
+                // service 4 GiB of PA).
+                ptw_req_addr  = {satp_i[21:0], 12'd0} + {20'd0, ptw_va_q[31:22], 2'b00};
                 if (ptw_req_ready) ptw_state_d = PTW_L1_WAIT;
             end
 
