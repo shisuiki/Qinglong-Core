@@ -2,6 +2,24 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-1 + 6C-3a + Zicntr: S-mode CSRs, delegation, SRET, PMP storage
+
+### What shipped
+- **Stage 6C-1 — priv modes + S-mode CSRs + trap delegation + SRET (`rtl/core/csr.sv`, `defs.svh`, `core_pipeline.sv`, `core_multicycle.sv`)**. `csr.sv` gets a `priv_mode_q` register tracking U/S/M, with full storage for `stvec`, `sepc`, `scause`, `stval`, `sscratch`, `satp`, `medeleg`, `mideleg`; `sstatus` / `sie` / `sip` are masked subset-views of their M-mode parents. Trap entry routes to `stvec` vs `mtvec` via a new `trap_to_s` output = (`priv_mode != M`) && `medeleg[cause]` (or `mideleg[cause]` for interrupts). `MRET` pops from MPP, `SRET` pops from SPP; MPRV clears per the spec. MISA advertises `S`. The pipeline plumbs `is_sret` through EX/MEM/WB in parallel with MRET; `wb_redirect_pc` picks `stvec` on delegated traps and `sepc` on SRET. `ECALL` cause now depends on current priv (U/S/M). `id_illegal` whitelists the full S-mode CSR set + `medeleg`/`mideleg`. Interrupt delegation storage is in place but the take path still routes to M (no S-mode software to exercise S-interrupts yet).
+- **Stage 6C-3a — PMP CSR storage (`rtl/core/csr.sv`, `defs.svh`, `core_pipeline.sv`)**. Added `pmpcfg0..3` and `pmpaddr0..15` as plain 32-bit R/W storage (no access-path enforcement yet). The sized-array layout is ready for a real PMP check in a later stage. `rv32mi-p-pmpaddr` takes the G=0 early-exit and passes the register-behavior probe.
+- **Zicntr unprivileged read-only aliases**: `cycle` / `cycleh` / `instret` / `instreth` mirror `mcycle` / `minstret`. The read-only-space check in `csr.sv` already rejects writes.
+
+### Tests
+- **Sim regression** (`make sim-all CORE=pipeline ICACHE=1 DCACHE=1`): **73/76** PASS, up from 71/76 in Stage 6B. Multicycle: **73/76** PASS too (shares `csr.sv` and gains PMP / Zicntr for free; multicycle stays M-only so SRET is not decoded there).
+- **Sim FreeRTOS** (`make run CORE=pipeline ICACHE=1 DCACHE=1 TEST=sw/freertos/freertos_demo.elf`): PASS + MMIO exit 0 at cycle 112,582,997 — unchanged vs Stage 6B baseline, within noise.
+- **Formal**: not re-run. The RVFI-visible pipeline behavior is unchanged; new S-mode wires only affect trap-direction PC selection at retirement.
+
+### Residuals (deferred)
+- `rv32ui-p-ma_data`, `rv32mi-p-breakpoint`, `rv32mi-p-illegal` — need MMU/SFENCE.VMA/Debug support. Parked for Stage 6C-2 (MMU) and later.
+- Stage 6C-2 (SV32 MMU + ITLB/DTLB + shared PTW) is next up and is a bigger, multi-commit piece; it hasn't started yet.
+- PMP enforcement in the access path is not implemented yet — storage only (Stage 6C-3a). Real PMP checks would land in 6C-3b once the MMU is in.
+- Interrupt delegation storage is in `mideleg_q` but the take path still routes to M. Finishing this requires S-mode software to drive it — wired up once Stage 6C-2 / 7 lands.
+
 ## 2026-04-18 — Stage 6B: Data cache (write-through, 4-way, 64 B lines, 16 KiB)
 
 ### What shipped
