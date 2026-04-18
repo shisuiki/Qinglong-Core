@@ -336,7 +336,12 @@ module core_pipeline #(
             if (allow_irq_inject) begin
                 id_valid_d     = 1'b1;
                 id_pc_d        = pc_q;
-                id_instr_d     = 32'h0000_0013;
+                // Use all-zero encoding (not 0x13/NOP): 0 has opcode=0 which
+                // doesn't match any legal insn, so riscv-formal's insn checks
+                // see spec_valid=0 and skip the retirement — as they should,
+                // since this is a trap retirement, not a real insn commit.
+                // 0x13 = ADDI x0,x0,0 used to leak into the insn_addi check.
+                id_instr_d     = 32'h0000_0000;
                 id_fault_d     = 1'b0;
                 id_pagefault_d = 1'b0;
                 id_irq_d       = 1'b1;
