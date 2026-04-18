@@ -58,9 +58,20 @@ module mmu (
     input  logic [15:0][7:0]  pmp_cfg_i,
     input  logic [15:0][31:0] pmp_addr_i,
 
-    // 1-cycle pulse from the core when SFENCE.VMA retires — flush the TLB.
-    // Per-ASID / per-VPN flushing isn't supported; we flush everything.
+    // 1-cycle pulse from the core when SFENCE.VMA retires, plus the live
+    // rs1/rs2 operands. rs1 is the target VA, rs2 is the target ASID[8:0];
+    // the *_nz flags come from the ISA-level "is the arch register x0?"
+    // check in the core. Four combinations (all legal per spec):
+    //   rs1=x0,rs2=x0 → flush all (global + non-global, any VA, any ASID)
+    //   rs1!=x0,rs2=x0 → flush entries whose VA matches, any ASID
+    //   rs1=x0,rs2!=x0 → flush entries whose ASID matches, *excluding globals*
+    //   rs1!=x0,rs2!=x0 → flush entries matching both VA and ASID, !globals
+    // Globals survive any rs2-targeted flush (they aren't owned by any ASID).
     input  logic        sfence_vma_i,
+    input  logic        sfence_rs1_nz_i,
+    input  logic [31:0] sfence_rs1_va_i,
+    input  logic        sfence_rs2_nz_i,
+    input  logic [8:0]  sfence_rs2_asid_i,
 
     // --- ifetch core-facing (upstream) ---
     // rsp_fault is a bus access fault (bare-mode access miss or downstream
@@ -869,11 +880,44 @@ module mmu (
                 dm_repl_q           <= dm_repl_q + 1'b1;
             end
 
-            // SFENCE.VMA: flush everything. No ASID / no per-VPN support.
+            // SFENCE.VMA with rs1/rs2 selectivity. Match semantics described
+            // at the port declaration above.
             if (sfence_vma_i) begin
                 for (int unsigned i = 0; i < TLB_N; i++) begin
-                    if_tlb_q[i].valid <= 1'b0;
-                    dm_tlb_q[i].valid <= 1'b0;
+                    // Precompute per-entry match predicates (superpage
+                    // expands the VPN match to VPN[1] only).
+                    logic if_vpn_match;
+                    logic dm_vpn_match;
+                    logic if_asid_match;
+                    logic dm_asid_match;
+
+                    if_vpn_match = if_tlb_q[i].is_sp
+                        ? (if_tlb_q[i].vpn[19:10] == sfence_rs1_va_i[31:22])
+                        : ({if_tlb_q[i].vpn[19:10], if_tlb_q[i].vpn[9:0]}
+                           == sfence_rs1_va_i[31:12]);
+                    dm_vpn_match = dm_tlb_q[i].is_sp
+                        ? (dm_tlb_q[i].vpn[19:10] == sfence_rs1_va_i[31:22])
+                        : ({dm_tlb_q[i].vpn[19:10], dm_tlb_q[i].vpn[9:0]}
+                           == sfence_rs1_va_i[31:12]);
+                    if_asid_match = (if_tlb_q[i].asid == sfence_rs2_asid_i);
+                    dm_asid_match = (dm_tlb_q[i].asid == sfence_rs2_asid_i);
+
+                    // Decide whether to invalidate each side.
+                    if (!sfence_rs1_nz_i && !sfence_rs2_nz_i) begin
+                        if_tlb_q[i].valid <= 1'b0;
+                        dm_tlb_q[i].valid <= 1'b0;
+                    end else if (sfence_rs1_nz_i && !sfence_rs2_nz_i) begin
+                        if (if_vpn_match) if_tlb_q[i].valid <= 1'b0;
+                        if (dm_vpn_match) dm_tlb_q[i].valid <= 1'b0;
+                    end else if (!sfence_rs1_nz_i && sfence_rs2_nz_i) begin
+                        if (!if_tlb_q[i].g && if_asid_match) if_tlb_q[i].valid <= 1'b0;
+                        if (!dm_tlb_q[i].g && dm_asid_match) dm_tlb_q[i].valid <= 1'b0;
+                    end else begin
+                        if (!if_tlb_q[i].g && if_asid_match && if_vpn_match)
+                            if_tlb_q[i].valid <= 1'b0;
+                        if (!dm_tlb_q[i].g && dm_asid_match && dm_vpn_match)
+                            dm_tlb_q[i].valid <= 1'b0;
+                    end
                 end
             end
 

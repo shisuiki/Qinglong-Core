@@ -2,6 +2,25 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-7: SFENCE.VMA rs1/rs2 selective flush
+
+### What shipped
+- **`rtl/core/mmu.sv`**. Added `sfence_rs1_nz_i`, `sfence_rs1_va_i`, `sfence_rs2_nz_i`, `sfence_rs2_asid_i` inputs. The TLB-flush block now implements the four spec-defined SFENCE.VMA forms: `x0,x0` flushes everything; `rs1,x0` flushes entries matching `va[31:12]` (superpages match on bits[31:22] only); `x0,rs2` flushes non-global entries matching ASID; `rs1,rs2` flushes non-global entries matching both. Globals survive any rs2-targeted flush. Over-flushing is spec-legal and we already had the full-flush path; the win here is letting OS-level per-VA and per-ASID invalidations stay fine-grained.
+- **`rtl/core/core_pipeline.sv`**. Carry rs1/rs2 live register values from EX through MEM→WB via new `mem_sfence_rs1/2_q` and `wb_sfence_rs1/2_q` fields, captured from `ex_rs1_fwd`/`ex_rs2_fwd` at EX→MEM. At WB, the SFENCE retirement drives `mmu_sfence_rs1_nz = (wb_instr[19:15] != 0)`, `mmu_sfence_rs2_nz = (wb_instr[24:20] != 0)`, and the stashed register words.
+- **`rtl/core/core_multicycle.sv`**. Simpler — multicycle already holds `rs1_data`/`rs2_data` and `rs1_i`/`rs2_i` live across the FSM, so SFENCE retirement directly drives the same four MMU outputs.
+- **`rtl/soc/soc_top.sv`** / **`formal/core_pipeline/wrapper.sv`**. Threaded the new signals through both cores and into the MMU instance; wrapper gained matching observable wires.
+- **`sw/tests/asm/mmu_sfence.S`** — end-to-end selectivity regression. Builds PT1/PT2 (ASIDs 1/2) mapping `DATA_VA` to distinct PAs, caches both entries, then mutates PT1's L0 PTE while both entries are live. Uses each SFENCE form and verifies exactly which entries survive: `sfence.vma x0,2` flushes only ASID=2; `sfence.vma x0,1` then flushes ASID=1 so the re-walk picks up the mutated PTE; per-VA `sfence.vma rs1,x0` is negative-tested (unrelated VA → no flush) and positive-tested (target VA → flush); finally `sfence.vma x0,x0` re-mutates and flushes everything. Each outcome is a `bne` against an expected pattern, so any selectivity bug fails loudly.
+
+### Tests
+- **`mmu_sfence.elf`**: PASS on both cores.
+- **All prior MMU/PMP tests** (`mmu_sv32`, `mmu_pagefault`, `mmu_ifetch`, `mmu_asid`, `s_irq`, `s_exc_deleg`, `pmp_enforce`): PASS on both cores, unchanged.
+- **Full regression**: **74/76** PASS on both cores, unchanged residuals (`ma_data`, `breakpoint`).
+- **Full formal suite**: **40/40 PASS** (reg_ch0 took 13:27 as usual).
+
+### Residuals (deferred)
+- SFENCE.VMA now flushes with correct selectivity, so the "no per-VPN / per-ASID" note from 6C-5/6C-6 is finally discharged. The hyper-pedantic case of non-leaf PTE caching (never cached here — we only cache leaves) is naturally out of scope.
+- No perf work on SFENCE: the TLB is 4-entry so even a full flush is cheap. With a larger TLB the selectivity would start paying off.
+
 ## 2026-04-18 — Stage 6C-6: ASID-tagged TLB + global-page bit
 
 ### What shipped

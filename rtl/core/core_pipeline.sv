@@ -77,7 +77,14 @@ module core_pipeline #(
     output logic        icache_invalidate,
 
     // ---- TLB flush on SFENCE.VMA (1-cycle pulse at retirement) ----
+    // rs1_nz / rs2_nz are the ISA "is x0?" booleans; rs1_va is the raw
+    // register value (low 12 bits ignored by the MMU), rs2_asid is the low
+    // 9 bits of rs2. See mmu.sv port comment for exact semantics.
     output logic        mmu_sfence_vma,
+    output logic        mmu_sfence_rs1_nz,
+    output logic [31:0] mmu_sfence_rs1_va,
+    output logic        mmu_sfence_rs2_nz,
+    output logic [8:0]  mmu_sfence_rs2_asid,
 
     // ---- CSR state visible to the MMU (Stage 6C-2) ----
     output logic [31:0] mmu_satp,
@@ -191,6 +198,11 @@ module core_pipeline #(
     logic [31:0] mem_csr_wdata_q, mem_csr_wdata_d;
     logic [2:0]  mem_csr_op_q, mem_csr_op_d;
     logic [4:0]  mem_csr_rs1imm_q, mem_csr_rs1imm_d;
+    // SFENCE.VMA needs the live rs1/rs2 register values at retire to drive
+    // the MMU's per-VA/per-ASID flush. They are captured at EX and carried
+    // through MEM/WB — meaningless for non-SFENCE retirements, but cheap.
+    logic [31:0] mem_sfence_rs1_q, mem_sfence_rs1_d;
+    logic [31:0] mem_sfence_rs2_q, mem_sfence_rs2_d;
     logic        mem_trap_q, mem_trap_d;
     logic [31:0] mem_cause_q, mem_cause_d;
     logic [31:0] mem_tval_q, mem_tval_d;
@@ -218,6 +230,8 @@ module core_pipeline #(
     logic [31:0] wb_csr_wdata_q, wb_csr_wdata_d;
     logic [2:0]  wb_csr_op_q, wb_csr_op_d;
     logic [4:0]  wb_csr_rs1imm_q, wb_csr_rs1imm_d;
+    logic [31:0] wb_sfence_rs1_q, wb_sfence_rs1_d;
+    logic [31:0] wb_sfence_rs2_q, wb_sfence_rs2_d;
 
     // Control / hazards / flush
     logic stall_id, stall_ex, stall_mem;
@@ -1000,6 +1014,8 @@ module core_pipeline #(
         mem_csr_wdata_d   = mem_csr_wdata_q;
         mem_csr_op_d      = mem_csr_op_q;
         mem_csr_rs1imm_d  = mem_csr_rs1imm_q;
+        mem_sfence_rs1_d  = mem_sfence_rs1_q;
+        mem_sfence_rs2_d  = mem_sfence_rs2_q;
         mem_trap_d        = mem_trap_q;
         mem_cause_d       = mem_cause_q;
         mem_tval_d        = mem_tval_q;
@@ -1069,6 +1085,11 @@ module core_pipeline #(
                 mem_csr_op_d      = ex_funct3_q;
                 mem_csr_rs1imm_d  = ex_rs1_q;
                 mem_csr_wdata_d   = ex_funct3_q[2] ? {27'd0, ex_rs1_q} : ex_rs1_fwd;
+
+                // Snapshot rs1/rs2 for SFENCE.VMA. Value is harmless for
+                // other ops; we only observe it at WB when wb_is_sfence.
+                mem_sfence_rs1_d  = ex_rs1_fwd;
+                mem_sfence_rs2_d  = ex_rs2_fwd;
 
                 mem_trap_d        = ex_trap;
                 mem_cause_d       = ex_cause;
@@ -1209,6 +1230,8 @@ module core_pipeline #(
         wb_csr_wdata_d      = mem_csr_wdata_q;
         wb_csr_op_d         = mem_csr_op_q;
         wb_csr_rs1imm_d     = mem_csr_rs1imm_q;
+        wb_sfence_rs1_d     = mem_sfence_rs1_q;
+        wb_sfence_rs2_d     = mem_sfence_rs2_q;
 
         if (mem_valid_q && !stall_mem) begin
             wb_valid_d      = 1'b1;
@@ -1396,7 +1419,11 @@ module core_pipeline #(
                         (wb_instr_q[6:0]   == `OP_SYSTEM) &&
                         (wb_instr_q[14:12] == `F3_PRIV) &&
                         (wb_instr_q[31:25] == 7'b0001001);
-    assign mmu_sfence_vma = wb_is_sfence;
+    assign mmu_sfence_vma      = wb_is_sfence;
+    assign mmu_sfence_rs1_nz   = (wb_instr_q[19:15] != 5'd0);
+    assign mmu_sfence_rs1_va   = wb_sfence_rs1_q;
+    assign mmu_sfence_rs2_nz   = (wb_instr_q[24:20] != 5'd0);
+    assign mmu_sfence_rs2_asid = wb_sfence_rs2_q[8:0];
 
     // trap_pending latch: prevents further fetches between EX trap detect and
     // WB trap commit. Redundant with wb_redirect now that branch_redirect is
@@ -1498,6 +1525,8 @@ module core_pipeline #(
             mem_csr_wdata_q      <= 32'd0;
             mem_csr_op_q         <= 3'd0;
             mem_csr_rs1imm_q     <= 5'd0;
+            mem_sfence_rs1_q     <= 32'd0;
+            mem_sfence_rs2_q     <= 32'd0;
             mem_trap_q           <= 1'b0;
             mem_cause_q          <= 32'd0;
             mem_tval_q           <= 32'd0;
@@ -1524,6 +1553,8 @@ module core_pipeline #(
             wb_csr_wdata_q       <= 32'd0;
             wb_csr_op_q          <= 3'd0;
             wb_csr_rs1imm_q      <= 5'd0;
+            wb_sfence_rs1_q      <= 32'd0;
+            wb_sfence_rs2_q      <= 32'd0;
 
             div_started_q        <= 1'b0;
             div_done_latched_q   <= 1'b0;
@@ -1613,6 +1644,8 @@ module core_pipeline #(
             mem_csr_wdata_q      <= mem_csr_wdata_d;
             mem_csr_op_q         <= mem_csr_op_d;
             mem_csr_rs1imm_q     <= mem_csr_rs1imm_d;
+            mem_sfence_rs1_q     <= mem_sfence_rs1_d;
+            mem_sfence_rs2_q     <= mem_sfence_rs2_d;
             mem_trap_q           <= mem_trap_d;
             mem_cause_q          <= mem_cause_d;
             mem_tval_q           <= mem_tval_d;
@@ -1679,6 +1712,8 @@ module core_pipeline #(
             wb_csr_wdata_q       <= wb_csr_wdata_d;
             wb_csr_op_q          <= wb_csr_op_d;
             wb_csr_rs1imm_q      <= wb_csr_rs1imm_d;
+            wb_sfence_rs1_q      <= wb_sfence_rs1_d;
+            wb_sfence_rs2_q      <= wb_sfence_rs2_d;
 
             div_started_q        <= div_started_d;
             div_done_latched_q   <= div_done_latched_d;

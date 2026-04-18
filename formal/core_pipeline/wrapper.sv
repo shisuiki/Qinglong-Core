@@ -56,6 +56,10 @@ module rvfi_wrapper (
     // for these in this config; wire them off so the port list is complete.
     (* keep *) wire        icache_invalidate;
     (* keep *) wire        mmu_sfence_vma;
+    (* keep *) wire        mmu_sfence_rs1_nz;
+    (* keep *) wire [31:0] mmu_sfence_rs1_va;
+    (* keep *) wire        mmu_sfence_rs2_nz;
+    (* keep *) wire [8:0]  mmu_sfence_rs2_asid;
     (* keep *) wire [31:0] mmu_satp;
     (* keep *) wire [1:0]  mmu_priv;
     (* keep *) wire        mmu_mprv;
@@ -103,6 +107,10 @@ module rvfi_wrapper (
 
         .icache_invalidate (icache_invalidate),
         .mmu_sfence_vma  (mmu_sfence_vma),
+        .mmu_sfence_rs1_nz   (mmu_sfence_rs1_nz),
+        .mmu_sfence_rs1_va   (mmu_sfence_rs1_va),
+        .mmu_sfence_rs2_nz   (mmu_sfence_rs2_nz),
+        .mmu_sfence_rs2_asid (mmu_sfence_rs2_asid),
         .mmu_satp        (mmu_satp),
         .mmu_priv        (mmu_priv),
         .mmu_mprv        (mmu_mprv),

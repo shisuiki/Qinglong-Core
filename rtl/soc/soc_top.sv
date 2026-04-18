@@ -113,7 +113,11 @@ module soc_top #(
     logic icache_invalidate_w;
 
     // SFENCE.VMA → MMU TLB flush pulse (Stage 6C-2c).
-    logic mmu_sfence_vma_w;
+    logic        mmu_sfence_vma_w;
+    logic        mmu_sfence_rs1_nz_w;
+    logic [31:0] mmu_sfence_rs1_va_w;
+    logic        mmu_sfence_rs2_nz_w;
+    logic [8:0]  mmu_sfence_rs2_asid_w;
 
 `ifdef USE_PIPELINE_CORE
     core_pipeline #(.RESET_PC(RESET_PC)) u_core (
@@ -139,6 +143,10 @@ module soc_top #(
 
         .icache_invalidate(icache_invalidate_w),
         .mmu_sfence_vma(mmu_sfence_vma_w),
+        .mmu_sfence_rs1_nz(mmu_sfence_rs1_nz_w),
+        .mmu_sfence_rs1_va(mmu_sfence_rs1_va_w),
+        .mmu_sfence_rs2_nz(mmu_sfence_rs2_nz_w),
+        .mmu_sfence_rs2_asid(mmu_sfence_rs2_asid_w),
 
         .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
@@ -172,7 +180,11 @@ module soc_top #(
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
         .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w),
         .mmu_pmp_cfg(mmu_pmp_cfg_w), .mmu_pmp_addr(mmu_pmp_addr_w),
-        .mmu_sfence_vma(mmu_sfence_vma_w)
+        .mmu_sfence_vma(mmu_sfence_vma_w),
+        .mmu_sfence_rs1_nz(mmu_sfence_rs1_nz_w),
+        .mmu_sfence_rs1_va(mmu_sfence_rs1_va_w),
+        .mmu_sfence_rs2_nz(mmu_sfence_rs2_nz_w),
+        .mmu_sfence_rs2_asid(mmu_sfence_rs2_asid_w)
     );
 `endif
 
@@ -190,6 +202,10 @@ module soc_top #(
         .sum_i(mmu_sum_w),   .mxr_i(mmu_mxr_w),
         .pmp_cfg_i(mmu_pmp_cfg_w), .pmp_addr_i(mmu_pmp_addr_w),
         .sfence_vma_i(mmu_sfence_vma_w),
+        .sfence_rs1_nz_i(mmu_sfence_rs1_nz_w),
+        .sfence_rs1_va_i(mmu_sfence_rs1_va_w),
+        .sfence_rs2_nz_i(mmu_sfence_rs2_nz_w),
+        .sfence_rs2_asid_i(mmu_sfence_rs2_asid_w),
 
         .if_core_req_valid(core_if_req_valid), .if_core_req_addr(core_if_req_addr), .if_core_req_ready(core_if_req_ready),
         .if_core_rsp_valid(core_if_rsp_valid), .if_core_rsp_data(core_if_rsp_data), .if_core_rsp_fault(core_if_rsp_fault),

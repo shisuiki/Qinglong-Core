@@ -73,7 +73,11 @@ module core_multicycle #(
     output logic [15:0][31:0] mmu_pmp_addr,
 
     // ---- TLB flush on SFENCE.VMA retirement (1-cycle pulse) ----
-    output logic        mmu_sfence_vma
+    output logic        mmu_sfence_vma,
+    output logic        mmu_sfence_rs1_nz,
+    output logic [31:0] mmu_sfence_rs1_va,
+    output logic        mmu_sfence_rs2_nz,
+    output logic [8:0]  mmu_sfence_rs2_asid
 );
 
     // =========================================================================
@@ -220,7 +224,13 @@ module core_multicycle #(
 
     // SFENCE.VMA pulses on retirement. Multicycle already drains fully
     // between instructions, so no redirect is needed — just flash the line.
-    assign mmu_sfence_vma = is_sfence && commit_valid && !commit_trap;
+    // rs1/rs2 values are the live register reads at commit; rs1_i/rs2_i are
+    // the ISA field values (used for "is x0?" check).
+    assign mmu_sfence_vma      = is_sfence && commit_valid && !commit_trap;
+    assign mmu_sfence_rs1_nz   = (rs1_i != 5'd0);
+    assign mmu_sfence_rs1_va   = rs1_data;
+    assign mmu_sfence_rs2_nz   = (rs2_i != 5'd0);
+    assign mmu_sfence_rs2_asid = rs2_data[8:0];
     assign mmu_sum  = sstatus_sum_v;
     assign mmu_mxr  = mstatus_mxr_v;
 
