@@ -2,6 +2,35 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 5 (pipelined core): 5-stage RV32IMA bring-up
+
+### What shipped
+- **`rtl/core/core_pipeline.sv`** — classic IF/ID/EX/MEM/WB pipeline, wire-compatible with `core_multicycle` at the soc boundary.
+  - Operand forwarding MEM→EX and WB→EX; load-use hazard stall; 2-bubble flush on mispredict (static not-taken); flush-to-retirement on traps/MRET.
+  - **M-ext**: MUL single-cycle in EX; DIV iterative (~33 cycles) stalls EX until `div_done`. Subtle fix: ID update gate is `!id_valid_q || !stall_id` (not `!stall_id`) so an empty ID can still absorb an arriving ifetch rsp during a downstream DIV stall. Without this, pc_q would keep advancing while rsps got dropped and the pipeline diverged by ~18 words.
+  - **A-ext**: atomics are serialized (drain pipe in ID, stall-based MEM state machine). LR arms a 4-byte-aligned reservation; SC checks hit/miss, hit drives a store beat + rd=0, miss short-circuits rd=1 via arith path. AMO.RMW runs a 2-phase MEM: phase 0 load beat (latches `amo_old`), phase 1 store beat with `op(amo_old, rs2)` computed combinationally across all 9 funct5 codes.
+  - Serializing ops (CSR, MRET, ECALL, EBREAK, WFI, FENCE, atomics) drain the pipe in ID for simpler hazard reasoning; cost is small since these are rare.
+- **`rtl/soc/soc_top.sv`** — `ifdef USE_PIPELINE_CORE` picks between `core_pipeline` and `core_multicycle`; ports are identical.
+- **`sim/Makefile`** — `CORE=pipeline` sets `-DUSE_PIPELINE_CORE`; default stays multicycle.
+- **`fpga/scripts/build_axi_hello.tcl`** — adds `core_pipeline.sv` to the source list; `USE_PIPELINE_CORE` env var flips the synth `-verilog_define`. `fpga/{axi_hello,freertos}/Makefile` accept `CORE=pipeline` and forward the env var.
+
+### Tests
+- **Sim regression** (`make sim-all CORE=pipeline`): 71/76 riscv-tests PASS — identical result to multicycle; the same 5 out-of-scope tests fail (`rv32ui-p-ma_data`, `rv32mi-p-breakpoint`, `rv32mi-p-illegal`, `rv32mi-p-pmpaddr`, `rv32mi-p-zicntr`).
+- **Sim C regression** (`make sim-c CORE=pipeline`): 7/7 PASS.
+- **Sim FreeRTOS** (`make run CORE=pipeline TEST=sw/freertos/freertos_demo.elf +timeout=200000000`): `PASS` + `MMIO exit 0` at cycle 112,551,142 — matches multicycle's 112.5 M cycles bit-for-bit at the retirement boundary (the serializing atomics + stall-based DIV give up IPC; that's the trade for keeping Stage 5E simple).
+- **Silicon** (2026-04-18 07:13): `make -C fpga/freertos synth CORE=pipeline` built `axi_hello.bit` with post-route **WNS = +3.702 ns** at 50 MHz (vs multicycle's +0.537 ns — pipeline breaks the critical path as expected). Programmed Urbana over JTAG, 30 s `/dev/ttyUSB1` capture showed FreeRTOS booting and running both tasks at the expected 2:1 rate (≈ 3.8 hello/s, 1.9 blink/s). First pipelined core running an RTOS on silicon.
+
+### Resource comparison (Spartan-7 xc7s50, 50 MHz):
+| | multicycle | pipeline |
+|---|---|---|
+| Slice LUTs | ~2.1k | 3,120 (9.6%) |
+| FFs | ~1.0k | 1,744 (2.7%) |
+| WNS @ 50 MHz | +0.537 ns | +3.702 ns |
+
+### Caveats
+- Atomics use stall-based serialization. A non-stalling implementation is possible with more bookkeeping (track in-flight ops + resolve reservation against forwarded MEM writes). Not needed yet — correctness is proved; park for later.
+- `build_axi_hello.tcl` hardcodes the output dir to `fpga/build/axi_hello/`, so synthing freertos+pipeline overwrites any prior axi_hello.bit at that path. Pre-existing; fix by parameterising `build_dir` when a second FPGA workflow needs it.
+
 ## 2026-04-17 — Stage 5.5: FreeRTOS bringup (sim + silicon)
 
 ### What shipped
