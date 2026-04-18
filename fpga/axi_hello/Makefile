@@ -34,6 +34,21 @@ else
 USE_PIPELINE_CORE :=
 endif
 
+# ICACHE=1 / DCACHE=1 interpose the caches between core and SRAM. Mirrors
+# sim/Makefile conventions.
+ICACHE ?=
+DCACHE ?=
+ifeq ($(ICACHE),1)
+USE_ICACHE := 1
+else
+USE_ICACHE :=
+endif
+ifeq ($(DCACHE),1)
+USE_DCACHE := 1
+else
+USE_DCACHE :=
+endif
+
 .PHONY: synth prog clean mem
 
 mem: $(MEM)
@@ -47,6 +62,8 @@ synth: $(MEM)
 	. $(VIVADO_SETTINGS) && \
 	    SRAM_INIT_FILE=$(abspath $(MEM)) \
 	    USE_PIPELINE_CORE=$(USE_PIPELINE_CORE) \
+	    USE_ICACHE=$(USE_ICACHE) \
+	    USE_DCACHE=$(USE_DCACHE) \
 	    vivado $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/vivado.log \
 	        -journal $(BUILD_DIR)/vivado.jou \

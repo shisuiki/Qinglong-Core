@@ -29,8 +29,10 @@ set src_list [list \
     [file join $repo_dir rtl core div_unit.sv]        \
     [file join $repo_dir rtl core core_multicycle.sv] \
     [file join $repo_dir rtl core core_pipeline.sv]   \
-    [file join $repo_dir rtl mem  sram_dp.sv]         \
-    [file join $repo_dir rtl soc  mmio.sv]            \
+    [file join $repo_dir rtl mem   sram_dp.sv]         \
+    [file join $repo_dir rtl cache icache.sv]          \
+    [file join $repo_dir rtl cache dcache.sv]          \
+    [file join $repo_dir rtl soc   mmio.sv]            \
     [file join $repo_dir rtl soc  clint.sv]           \
     [file join $repo_dir rtl soc  axi_lite_master.sv] \
     [file join $repo_dir rtl soc  soc_top.sv]         \
@@ -98,10 +100,28 @@ if {[info exists ::env(USE_PIPELINE_CORE)] && $::env(USE_PIPELINE_CORE) ne "" &&
     puts "==> build_axi_hello: core       = multicycle (default)"
 }
 
-if {$use_pipeline} {
+set use_icache 0
+if {[info exists ::env(USE_ICACHE)] && $::env(USE_ICACHE) ne "" && $::env(USE_ICACHE) ne "0"} {
+    set use_icache 1
+    puts "==> build_axi_hello: icache     = on (USE_ICACHE)"
+}
+set use_dcache 0
+if {[info exists ::env(USE_DCACHE)] && $::env(USE_DCACHE) ne "" && $::env(USE_DCACHE) ne "0"} {
+    set use_dcache 1
+    puts "==> build_axi_hello: dcache     = on (USE_DCACHE)"
+}
+
+set verilog_defines [list]
+if {$use_pipeline} { lappend verilog_defines USE_PIPELINE_CORE }
+if {$use_icache}   { lappend verilog_defines USE_ICACHE }
+if {$use_dcache}   { lappend verilog_defines USE_DCACHE }
+
+if {[llength $verilog_defines] > 0} {
+    set verilog_define_args [list]
+    foreach d $verilog_defines { lappend verilog_define_args -verilog_define $d }
     synth_design -top $top -part $part -include_dirs $inc_dir \
                  -generic SRAM_INIT_FILE=$init_file \
-                 -verilog_define USE_PIPELINE_CORE
+                 {*}$verilog_define_args
 } else {
     synth_design -top $top -part $part -include_dirs $inc_dir \
                  -generic SRAM_INIT_FILE=$init_file
