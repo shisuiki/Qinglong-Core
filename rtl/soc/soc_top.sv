@@ -95,6 +95,10 @@ module soc_top #(
     logic [1:0]  mmu_priv_w, mmu_mpp_w;
     logic        mmu_mprv_w, mmu_sum_w, mmu_mxr_w;
 
+    // PMP static config exported by CSR, consumed by MMU's PMP checker.
+    logic [7:0]  mmu_pmp_cfg_w  [0:15];
+    logic [31:0] mmu_pmp_addr_w [0:15];
+
     // Page-fault outputs from the MMU (Stage 6C-2d). Mutually exclusive with
     // the access-fault path.
     logic core_if_rsp_pagefault, core_dm_rsp_pagefault;
@@ -138,7 +142,8 @@ module soc_top #(
 
         .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
-        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w)
+        .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w),
+        .mmu_pmp_cfg(mmu_pmp_cfg_w), .mmu_pmp_addr(mmu_pmp_addr_w)
     );
 `else
     assign icache_invalidate_w = 1'b0;
@@ -166,6 +171,7 @@ module soc_top #(
         .mmu_satp(mmu_satp_w), .mmu_priv(mmu_priv_w),
         .mmu_mprv(mmu_mprv_w), .mmu_mpp(mmu_mpp_w),
         .mmu_sum(mmu_sum_w),   .mmu_mxr(mmu_mxr_w),
+        .mmu_pmp_cfg(mmu_pmp_cfg_w), .mmu_pmp_addr(mmu_pmp_addr_w),
         .mmu_sfence_vma(mmu_sfence_vma_w)
     );
 `endif
@@ -182,6 +188,7 @@ module soc_top #(
         .satp_i(mmu_satp_w), .priv_i(mmu_priv_w),
         .mprv_i(mmu_mprv_w), .mpp_i(mmu_mpp_w),
         .sum_i(mmu_sum_w),   .mxr_i(mmu_mxr_w),
+        .pmp_cfg_i(mmu_pmp_cfg_w), .pmp_addr_i(mmu_pmp_addr_w),
         .sfence_vma_i(mmu_sfence_vma_w),
 
         .if_core_req_valid(core_if_req_valid), .if_core_req_addr(core_if_req_addr), .if_core_req_ready(core_if_req_ready),

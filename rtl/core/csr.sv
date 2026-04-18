@@ -63,7 +63,13 @@ module csr (
 
     // combinational interrupt-take decision and cause (priority MEI > MSI > MTI)
     output logic        irq_pending,   // asserted while an M-mode interrupt can be taken
-    output logic [31:0] irq_cause
+    output logic [31:0] irq_cause,
+
+    // PMP state — 16 entries. cfg bytes come from pmpcfg0..3 (4 bytes per
+    // CSR), addrs from pmpaddr0..15. Exposed flat for easy wiring into
+    // the MMU's access-check path.
+    output logic [7:0]  pmp_cfg_out  [0:15],
+    output logic [31:0] pmp_addr_out [0:15]
 );
 
     // ------------- CSR storage -------------
@@ -112,6 +118,14 @@ module csr (
     assign mstatus_mpp  = mstatus_q[`MSTATUS_MPP_HI:`MSTATUS_MPP_LO];
     assign mstatus_tvm  = mstatus_q[`MSTATUS_TVM_BIT];
     assign mstatus_tsr  = mstatus_q[`MSTATUS_TSR_BIT];
+
+    // Fan out PMP storage. Byte-unpack pmpcfg0..3 and pass pmpaddr through.
+    generate
+        for (genvar pi = 0; pi < 16; pi = pi + 1) begin : g_pmp_fanout
+            assign pmp_cfg_out[pi]  = pmpcfg_q[pi / 4][(pi % 4) * 8 +: 8];
+            assign pmp_addr_out[pi] = pmpaddr_q[pi];
+        end
+    endgenerate
 
     // ------------- mip composition -------------
     // External bits (MSIP/MTIP/MEIP) come from the interrupt controllers.

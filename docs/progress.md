@@ -2,6 +2,24 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-3b: PMP enforcement
+
+### What shipped
+- **`rtl/core/pmp.sv`** — new combinational PMP checker. 16 entries, priority-encoded, supports OFF/TOR/NA4/NAPOT. NAPOT uses the standard trailing-ones trick (`run_mask = pmpaddr ^ (pmpaddr + 1)`, `cmp_mask = ~run_mask`) to extract the compare window. Lock bit (L) extends the check to M-mode. Spec deviation: if *no* entry has A != OFF, PMP is treated as unimplemented (all accesses succeed); spec behaviour (deny S/U on no-match) is only engaged once software programs at least one entry. This keeps existing S-mode tests that never configure PMP working without a catch-all entry.
+- **CSR fanout (`rtl/core/csr.sv`)**. Added `pmp_cfg_out[0:15]` and `pmp_addr_out[0:15]` outputs that unpack the existing `pmpcfg0..3` / `pmpaddr0..15` storage byte- and word-wise.
+- **MMU integration (`rtl/core/mmu.sv`)**. Two instances of `pmp`: `u_pmp_if` (exec, priv=`priv_i`) and `u_pmp_dm` (r/w from `dm_core_req_wen`, priv=`dm_eff_priv`). PA selection uses a dedicated pair of always_combs (bare → `core_req_addr`, TLB hit → `*_tlb_pa`, post-walk → `*_xlate_pa_q`) so the main branch mux stays acyclic. On PMP deny the main combinational block's tail overrides its outputs to synthesize an access-fault reply (`rsp_fault=1`, `rsp_pagefault=0`) — distinct from the page-fault path. A pair of pending latches (`if_pmp_pending_q`, `dm_pmp_pending_q`) hold the fault across the multicycle core's S_EXEC→S_MEM boundary, since `dmem_req_valid` is only high in S_EXEC and `dmem_rsp_ready` only rises in S_MEM.
+- **Core plumbing (`rtl/core/core_pipeline.sv`, `rtl/core/core_multicycle.sv`)**. Both cores expose `mmu_pmp_cfg[0:15]` / `mmu_pmp_addr[0:15]` arrays driven by the CSR file and consumed by the MMU instance in `soc_top.sv`.
+- **`sw/tests/asm/pmp_enforce.S`** — end-to-end test. In M-mode, programs entry 0 = NAPOT(16B @ 0x80003000, R=1 W=0 X=0, L=1), entries 1/2 = NAPOT 2GiB catch-alls (RWX=1, L=1). Verifies: (i) `lw` from 0x80003000 succeeds, (ii) `sw` to 0x80003000 traps with mcause=7 at the expected mepc (handler advances mepc past the store), (iii) r/w to 0x80003020 (outside the RO window) unaffected.
+
+### Tests
+- **`pmp_enforce.elf`**: PASS on both cores.
+- **Full regression** (`make sim-all` both cores): **74/76** PASS, unchanged. Residuals still `ma_data` and `breakpoint`.
+- **Other MMU tests** (`mmu_sv32`, `mmu_pagefault`, `mmu_ifetch`, `s_irq`): PASS on both cores, unchanged.
+
+### Residuals (deferred)
+- PMP NAPOT with A=NA4 (granule 4B exactly) is decoded, but no test exercises it yet.
+- Mixed TOR+NAPOT configurations are not regression-tested; the 16-entry priority encoder is simulated but not proved.
+
 ## 2026-04-18 — Stage 6C-5: S-mode interrupt delegation + multicycle SRET
 
 ### What shipped

@@ -52,6 +52,12 @@ module mmu (
     input  logic        sum_i,
     input  logic        mxr_i,
 
+    // PMP storage — 16 entries. A `pmp` checker instantiated inside the MMU
+    // runs on both ifetch and dmem final PAs. Faults here surface as
+    // access-faults (rsp_fault) distinct from page-faults.
+    input  logic [7:0]  pmp_cfg_i  [0:15],
+    input  logic [31:0] pmp_addr_i [0:15],
+
     // 1-cycle pulse from the core when SFENCE.VMA retires — flush the TLB.
     // Per-ASID / per-VPN flushing isn't supported; we flush everything.
     input  logic        sfence_vma_i,
@@ -482,6 +488,81 @@ module mmu (
     wire dm_tlb_go     = xlate_dm && dm_tlb_hit &&  dm_tlb_perm_ok;
     wire dm_tlb_deny   = xlate_dm && dm_tlb_hit && !dm_tlb_perm_ok;
 
+    // ---------------------------------------------------------------------
+    // PMP check on the final PA for both paths. Runs in parallel with the
+    // main branch muxing below: first always_comb selects the PA we'd send
+    // downstream (`*_pmp_addr`), the pmp module produces `*_pmp_fault`,
+    // and the branch always_comb overrides the outputs at its tail to
+    // synthesize an access-fault reply when PMP denies. Upstream priv for
+    // ifetch is `priv_i`; for dmem it's `dm_eff_priv` (MPRV/MPP tracked).
+    // ---------------------------------------------------------------------
+    logic [31:0] if_pmp_addr, dm_pmp_addr;
+    logic        if_pmp_active, dm_pmp_active;
+    logic        if_pmp_fault, dm_pmp_fault;
+
+    always_comb begin
+        if_pmp_addr   = 32'd0;
+        if_pmp_active = 1'b0;
+        if (!xlate_if) begin
+            if_pmp_addr   = if_core_req_addr;
+            if_pmp_active = if_core_req_valid;
+        end else if (if_tlb_go) begin
+            if_pmp_addr   = if_tlb_pa;
+            if_pmp_active = if_core_req_valid;
+        end else if (xlate_if && if_xlate_valid_q && !if_xlate_fault_q) begin
+            if_pmp_addr   = if_xlate_pa_q;
+            if_pmp_active = if_core_req_valid;
+        end
+    end
+
+    always_comb begin
+        dm_pmp_addr   = 32'd0;
+        dm_pmp_active = 1'b0;
+        if (!xlate_dm) begin
+            dm_pmp_addr   = dm_core_req_addr;
+            dm_pmp_active = dm_core_req_valid;
+        end else if (dm_tlb_go) begin
+            dm_pmp_addr   = dm_tlb_pa;
+            dm_pmp_active = dm_core_req_valid;
+        end else if (xlate_dm && dm_xlate_valid_q && !dm_xlate_fault_q) begin
+            dm_pmp_addr   = dm_xlate_pa_q;
+            dm_pmp_active = dm_core_req_valid;
+        end
+    end
+
+    pmp u_pmp_if (
+        .cfg_i             (pmp_cfg_i),
+        .addr_i            (pmp_addr_i),
+        .priv_i            (priv_i),
+        .access_addr_i     (if_pmp_addr),
+        .access_is_read_i  (1'b0),
+        .access_is_write_i (1'b0),
+        .access_is_exec_i  (1'b1),
+        .fault_o           (if_pmp_fault)
+    );
+
+    pmp u_pmp_dm (
+        .cfg_i             (pmp_cfg_i),
+        .addr_i            (pmp_addr_i),
+        .priv_i            (dm_eff_priv),
+        .access_addr_i     (dm_pmp_addr),
+        .access_is_read_i  (~dm_core_req_wen),
+        .access_is_write_i ( dm_core_req_wen),
+        .access_is_exec_i  (1'b0),
+        .fault_o           (dm_pmp_fault)
+    );
+
+    wire if_pmp_kill_comb = if_pmp_active && if_pmp_fault;
+    wire dm_pmp_kill_comb = dm_pmp_active && dm_pmp_fault;
+
+    // Latch the PMP fault so it persists across the multicycle core's
+    // S_EXEC → S_MEM transition (rsp_ready only asserts in S_MEM, but
+    // req_valid is only high in S_EXEC). Same pattern the existing
+    // tlb_deny path uses via dm_xlate_valid_q.
+    logic if_pmp_pending_q, dm_pmp_pending_q;
+    wire  if_pmp_kill = if_pmp_kill_comb || if_pmp_pending_q;
+    wire  dm_pmp_kill = dm_pmp_kill_comb || dm_pmp_pending_q;
+
     // IFETCH
     wire if_forward = xlate_if && if_xlate_valid_q && !if_xlate_fault_q;
     wire if_fault_reply = xlate_if && if_xlate_valid_q &&  if_xlate_fault_q;
@@ -540,6 +621,19 @@ module mmu (
             if_core_rsp_data  = 32'd0;
             if_core_rsp_fault = 1'b0;
             if_ds_rsp_ready   = 1'b1;
+        end
+
+        // PMP denial: suppress the downstream request and synthesize an
+        // access-fault reply (distinct from page-fault). Overrides whichever
+        // branch set the raw outputs above.
+        if (if_pmp_kill) begin
+            if_ds_req_valid       = 1'b0;
+            if_core_req_ready     = 1'b1;
+            if_core_rsp_valid     = 1'b1;
+            if_core_rsp_data      = 32'd0;
+            if_core_rsp_fault     = 1'b1;
+            if_core_rsp_pagefault = 1'b0;
+            if_ds_rsp_ready       = 1'b1;
         end
     end
 
@@ -627,6 +721,19 @@ module mmu (
             dm_core_rsp_fault = 1'b0;
             dm_ds_rsp_ready   = 1'b1;
         end
+
+        // PMP denial: suppress the downstream request and synthesize an
+        // access-fault reply.
+        if (dm_pmp_kill) begin
+            dm_ds_req_valid       = 1'b0;
+            dm_ds_req_wen         = 1'b0;
+            dm_core_req_ready     = 1'b1;
+            dm_core_rsp_valid     = 1'b1;
+            dm_core_rsp_rdata     = 32'd0;
+            dm_core_rsp_fault     = 1'b1;
+            dm_core_rsp_pagefault = 1'b0;
+            dm_ds_rsp_ready       = 1'b1;
+        end
     end
 
     wire dm_forward_rsp_done = dm_forward && dm_ds_rsp_valid && dm_core_rsp_ready;
@@ -664,6 +771,8 @@ module mmu (
             dm_xlate_pa_q    <= 32'd0;
             if_repl_q        <= '0;
             dm_repl_q        <= '0;
+            if_pmp_pending_q <= 1'b0;
+            dm_pmp_pending_q <= 1'b0;
             for (int unsigned i = 0; i < TLB_N; i++) begin
                 if_tlb_q[i] <= '0;
                 dm_tlb_q[i] <= '0;
@@ -743,6 +852,21 @@ module mmu (
                     dm_tlb_q[i].valid <= 1'b0;
                 end
             end
+
+            // PMP fault latch. The combinational kill is synthesized the
+            // same cycle the core first presents the request, but the
+            // multicycle core doesn't assert rsp_ready until the *next*
+            // cycle (in S_MEM). Hold the fault across the boundary until
+            // rsp_ready closes the handshake.
+            if (if_pmp_kill_comb && if_core_req_valid && !if_core_rsp_ready)
+                if_pmp_pending_q <= 1'b1;
+            else if (if_pmp_pending_q && if_core_rsp_ready)
+                if_pmp_pending_q <= 1'b0;
+
+            if (dm_pmp_kill_comb && dm_core_req_valid && !dm_core_rsp_ready)
+                dm_pmp_pending_q <= 1'b1;
+            else if (dm_pmp_pending_q && dm_core_rsp_ready)
+                dm_pmp_pending_q <= 1'b0;
         end
     end
 

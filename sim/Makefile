@@ -22,6 +22,7 @@ RTL_FILES := \
     $(RTL_DIR)/core/core_multicycle.sv \
     $(RTL_DIR)/core/core_pipeline.sv \
     $(RTL_DIR)/core/mmu.sv \
+    $(RTL_DIR)/core/pmp.sv \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/mem/axil_bram_slave.sv \
     $(RTL_DIR)/mem/axil_uartlite_sim.sv \
