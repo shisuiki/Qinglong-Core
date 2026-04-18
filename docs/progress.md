@@ -2,6 +2,34 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Formal verification (riscv-formal, RV32I)
+
+### What shipped
+- **`formal/core_pipeline/`** — new tree. `wrapper.sv` instantiates `core_pipeline` for YosysHQ/riscv-formal; symbolic ifetch/dmem/IRQ inputs via `rvformal_rand_reg`. `checks.cfg` drives the upstream genchecks.py (insn/causal/cover/reg); `Makefile` stages both into `third_party/riscv-formal/cores/core_pipeline/`.
+- **`rtl/core/core_pipeline_rvfi.svh`** — RVFI (RISC-V Formal Interface) tap. `ifdef RISCV_FORMAL` includes it into `core_pipeline.sv`. Shadow EX/MEM/WB pipeline carries the 20-signal retirement trace: rs1/rs2 addr+rdata, next-pc, mem addr/rmask/wmask/wdata/rdata, rd addr+wdata, trap, order counter, intr.
+- **First-pass scoping**: wrapper assumes no ifetch/dmem faults and no external IRQs so `insn_*` checks isolate architectural behaviour from trap-path handling (separate checks for those are a later pass).
+
+### Tests (all PASS)
+- **37 / 37 RV32I insn checks**: every `insn_*` model (`addi`/`add`/`sub`/`sll`…`sltiu`/all branches/`jal`/`jalr`/`lui`/`auipc`/`lb..lw`/`sb..sw`/…) proven retirement-correct at depth 20 against the upstream spec models.
+- **causal_ch0**: proves *any* valid retirement is reachable (i.e. the pipeline can actually retire instructions under symbolic stimulus — sanity against a pipeline that's trivially "stuck").
+- **cover**: reaches two retirements in the bounded run, witnessing at least that much forward progress.
+- **reg_ch0** (depth 20): proves the architectural register file is preserved across in-flight retirements — reading register x ever returns the value of the most-recent retired write to x. Caught a real shadow-tap bug (see below); now clean.
+
+### The reg_ch0 bug and fix
+- Symptom: `reg_ch0` counterexample with `DIV` reading an `rs1` register that a prior ADDI had written. The DIV result itself was correct — the core's arithmetic was fine — but the RVFI shadow reported a stale `rvfi_rs1_rdata`.
+- Root cause (shadow-tap only, not a core bug): my original tap captured `ex_rs1_fwd` at the EX→MEM advance cycle. For DIV, that's the cycle the divide *finishes*, which can be tens of cycles after EX first sees the insn. During the DIV stall, the producer drifts from MEM → WB → regfile. The core's forwarding paths only cover MEM and WB; once the producer passes WB, `ex_rs1_fwd` falls through to `ex_rs1_q_data` which was latched at ID with the *old* value. DIV sampled the correct operand via `div_start_pulse` on cycle 1, so arithmetic was right — only the RVFI mirror was stale.
+- Fix: `rtl/core/core_pipeline_rvfi.svh` now holds a "first stall cycle" snapshot. When EX stalls with `ex_valid_q=1` and no snapshot yet, it latches `ex_rs1_fwd` / `ex_rs2_fwd` (which *are* correct on cycle 1). On the EX→MEM advance, a mux selects the snapshot over the (possibly stale) current forward view. Single-cycle insns never snapshot — they still pass `ex_rs1_fwd` combinationally, matching the old behaviour.
+- Intermediate dead end: a first attempt stored the snapshot on *any* "first cycle of EX" (including single-cycle insns) and produced an NBA hazard — on a cycle where both the snapshot-write and EX→MEM advance fired, the MEM-shadow NBA read the snapshot's *pre-edge* value (the previous insn's). Fixed by gating the snapshot on `stall_ex` only, and driving the MEM shadow through a combinational mux.
+
+### Caveats
+- `reg` check runs at depth 20 (~10 min). Depth 30 was explored, solver ran >1.5 h without resolving; parked — depth 20 gives a 20-cycle window that covers the pipe depth plus DIV latency (≈33) minus initial IF latency, which is more than enough to expose the failing case found above.
+- Not yet covered: IRQ/trap retirement semantics, CSR spec checks, bus-fault paths, RV32M/RV32A spec models (not shipped upstream), rv32imc. These are orthogonal follow-ups; current suite gates RV32I correctness.
+- Solver is `boolector` (default via sby). No engine sweeps tried yet.
+
+### Next steps
+- Optionally bring up CSR / IRQ checks by dropping the wrapper's fault/irq assumes and teaching the tap how to observe trap retirement tuples.
+- When we add caches / MMU, re-run the suite against the new `core_pipeline` — the tap should be transparent to those changes.
+
 ## 2026-04-18 — Stage 5 (pipelined core): 5-stage RV32IMA bring-up
 
 ### What shipped

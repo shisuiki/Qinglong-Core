@@ -54,6 +54,55 @@ end
 wire [31:0] ex_rvfi_mem_addr = {ls_addr[31:2], 2'b00};
 
 // -----------------------------------------------------------------------------
+// Forward-operand view for RVFI.
+//
+// Forwarding (ex_rs1_fwd/ex_rs2_fwd) is only guaranteed to reflect the
+// operand the core used on cycles where the insn had a chance to consume it.
+// On the first cycle an insn is in EX, the producer is still in MEM or WB
+// and the forward paths cover it. If EX then stalls (DIV, or mem_busy
+// stalling an insn upstream), the producer can drain past WB into the
+// regfile. ex_rs1_fwd then falls through to ex_rs1_q_data, which was
+// snapshotted at ID-time with the OLD value. For DIV this doesn't affect
+// the result (div_start_pulse latched the correct operand on cycle 1), but
+// the RVFI shadow that samples at EX→MEM would see the stale fall-through.
+//
+// So: on the first cycle we observe stall_ex=1 while this insn is in EX,
+// latch the forwarded operand. On subsequent stall cycles hold the latched
+// value; on the advance cycle, mux it in. For insns that never stall in EX
+// (single-cycle common case), pass ex_rs1_fwd through combinationally — this
+// matches the old behaviour and avoids a stale-latched-prior-insn NBA hazard.
+logic [31:0] ex_rvfi_rs1_held_q, ex_rvfi_rs2_held_q;
+logic        ex_rvfi_stalled_q;
+
+wire [31:0] ex_rs1_fwd_z = (ex_rs1_q == 5'd0) ? 32'd0 : ex_rs1_fwd;
+wire [31:0] ex_rs2_fwd_z = (ex_rs2_q == 5'd0) ? 32'd0 : ex_rs2_fwd;
+
+wire [31:0] ex_rvfi_rs1_now = ex_rvfi_stalled_q ? ex_rvfi_rs1_held_q : ex_rs1_fwd_z;
+wire [31:0] ex_rvfi_rs2_now = ex_rvfi_stalled_q ? ex_rvfi_rs2_held_q : ex_rs2_fwd_z;
+
+always_ff @(posedge clk) begin
+    if (rst) begin
+        ex_rvfi_rs1_held_q <= 32'd0;
+        ex_rvfi_rs2_held_q <= 32'd0;
+        ex_rvfi_stalled_q  <= 1'b0;
+    end else begin
+        // First cycle EX stalls for this insn: latch the current forward view.
+        if (ex_valid_q && stall_ex && !ex_rvfi_stalled_q) begin
+            ex_rvfi_rs1_held_q <= ex_rs1_fwd_z;
+            ex_rvfi_rs2_held_q <= ex_rs2_fwd_z;
+            ex_rvfi_stalled_q  <= 1'b1;
+        end
+        // EX advances: next cycle holds a different insn (or bubble) — re-arm.
+        if (!stall_ex && ex_valid_q) begin
+            ex_rvfi_stalled_q <= 1'b0;
+        end
+        if (flush_ex) begin
+            ex_rvfi_stalled_q <= 1'b0;
+        end
+    end
+end
+
+// -----------------------------------------------------------------------------
 // EX → MEM shadow pipeline
 // -----------------------------------------------------------------------------
 logic [4:0]  mem_rvfi_rs1_addr_q, mem_rvfi_rs2_addr_q;
@@ -119,8 +168,9 @@ always_ff @(posedge clk) begin
         if (!stall_ex && ex_valid_q) begin
             mem_rvfi_rs1_addr_q  <= ex_rs1_q;
             mem_rvfi_rs2_addr_q  <= ex_rs2_q;
-            mem_rvfi_rs1_rdata_q <= (ex_rs1_q == 5'd0) ? 32'd0 : ex_rs1_fwd;
-            mem_rvfi_rs2_rdata_q <= (ex_rs2_q == 5'd0) ? 32'd0 : ex_rs2_fwd;
+            // ex_rvfi_rs{1,2}_now: held-through-stall view of the forward operand.
+            mem_rvfi_rs1_rdata_q <= ex_rvfi_rs1_now;
+            mem_rvfi_rs2_rdata_q <= ex_rvfi_rs2_now;
             mem_rvfi_next_pc_q   <= ex_rvfi_next_pc;
             mem_rvfi_mem_addr_q  <= ex_rvfi_mem_addr;
             mem_rvfi_mem_rmask_q <= ex_rvfi_mem_rmask;
