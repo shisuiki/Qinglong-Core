@@ -2,6 +2,18 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-3c: PMP lock-bit write-side enforcement
+
+### What shipped
+- **`rtl/core/csr.sv`**. WARL handling for `pmpcfg0..3` and `pmpaddr0..15`:
+  - `pmpcfg` writes go through a per-byte merge: if the current byte has L=1, the incoming byte is dropped and the old byte retained. Byte 3 of `pmpcfgN` (entry 4N+3) behaves normally when unlocked.
+  - `pmpaddr[i]` writes are gated by `pmpaddr_locked[i] = L[i] | (i<15 && L[i+1] && A[i+1]==TOR)`. The TOR clause honours the spec: entry i+1 being TOR means it uses pmpaddr[i] as its lower bound, so locking entry i+1 also locks pmpaddr[i].
+- **`sw/tests/asm/pmp_enforce.S`** extended. After the access-path tests, writes garbage to pmpaddr0 and zero to pmpcfg0 and verifies neither stuck (L=1 on entries 0/1/2 keeps every relevant byte and pmpaddr in place).
+
+### Tests
+- **`pmp_enforce.elf`**: PASS on both cores (pipeline 319 cycles).
+- **Full regression**: **74/76** unchanged on both cores.
+
 ## 2026-04-18 — Stage 6C-3b: PMP enforcement
 
 ### What shipped

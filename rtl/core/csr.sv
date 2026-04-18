@@ -119,6 +119,42 @@ module csr (
     assign mstatus_tvm  = mstatus_q[`MSTATUS_TVM_BIT];
     assign mstatus_tsr  = mstatus_q[`MSTATUS_TSR_BIT];
 
+    // Per-entry lock / A-mode derived from pmpcfg_q. Used for WARL masking
+    // on pmpaddr and pmpcfg writes (priv-spec: L=1 makes that cfg byte and
+    // its pmpaddr read-only, and locks pmpaddr[i-1] whenever entry i is TOR).
+    logic [15:0] pmp_L;
+    logic [15:0] pmp_A_is_tor;
+    logic [15:0] pmpaddr_locked;
+    always_comb begin
+        for (int i = 0; i < 16; i++) begin
+            pmp_L[i]        = pmpcfg_q[i/4][(i%4)*8 + 7];
+            pmp_A_is_tor[i] = (pmpcfg_q[i/4][(i%4)*8 + 3 +: 2] == 2'b01);
+        end
+        for (int i = 0; i < 16; i++) begin
+            if (i == 15)
+                pmpaddr_locked[i] = pmp_L[i];
+            else
+                pmpaddr_locked[i] = pmp_L[i]
+                                  | (pmp_L[i+1] & pmp_A_is_tor[i+1]);
+        end
+    end
+
+    // Per-byte merge for pmpcfg writes: keep byte if its L=1, else take
+    // the new byte. `wb_new` is the word being written, `old_w` is the
+    // current value of pmpcfgN.
+    function automatic [31:0] pmpcfg_write_mask(input [31:0] old_w,
+                                                input [31:0] wb_new);
+        logic [31:0] r;
+        r = 32'd0;
+        for (int b = 0; b < 4; b++) begin
+            if (old_w[b*8 + 7])
+                r[b*8 +: 8] = old_w[b*8  +: 8];
+            else
+                r[b*8 +: 8] = wb_new[b*8 +: 8];
+        end
+        return r;
+    endfunction
+
     // Fan out PMP storage. Byte-unpack pmpcfg0..3 and pass pmpaddr through.
     generate
         for (genvar pi = 0; pi < 16; pi = pi + 1) begin : g_pmp_fanout
@@ -412,27 +448,28 @@ module csr (
                     `CSR_SCAUSE:    scause_q   <= new_val;
                     `CSR_STVAL:     stval_q    <= new_val;
                     `CSR_SATP:      satp_q     <= new_val;
-                    // PMP storage — no lock enforcement yet.
-                    `CSR_PMPCFG0:   pmpcfg_q[0]  <= new_val;
-                    `CSR_PMPCFG1:   pmpcfg_q[1]  <= new_val;
-                    `CSR_PMPCFG2:   pmpcfg_q[2]  <= new_val;
-                    `CSR_PMPCFG3:   pmpcfg_q[3]  <= new_val;
-                    `CSR_PMPADDR0:  pmpaddr_q[0]  <= new_val;
-                    `CSR_PMPADDR1:  pmpaddr_q[1]  <= new_val;
-                    `CSR_PMPADDR2:  pmpaddr_q[2]  <= new_val;
-                    `CSR_PMPADDR3:  pmpaddr_q[3]  <= new_val;
-                    `CSR_PMPADDR4:  pmpaddr_q[4]  <= new_val;
-                    `CSR_PMPADDR5:  pmpaddr_q[5]  <= new_val;
-                    `CSR_PMPADDR6:  pmpaddr_q[6]  <= new_val;
-                    `CSR_PMPADDR7:  pmpaddr_q[7]  <= new_val;
-                    `CSR_PMPADDR8:  pmpaddr_q[8]  <= new_val;
-                    `CSR_PMPADDR9:  pmpaddr_q[9]  <= new_val;
-                    `CSR_PMPADDR10: pmpaddr_q[10] <= new_val;
-                    `CSR_PMPADDR11: pmpaddr_q[11] <= new_val;
-                    `CSR_PMPADDR12: pmpaddr_q[12] <= new_val;
-                    `CSR_PMPADDR13: pmpaddr_q[13] <= new_val;
-                    `CSR_PMPADDR14: pmpaddr_q[14] <= new_val;
-                    `CSR_PMPADDR15: pmpaddr_q[15] <= new_val;
+                    // PMP WARL: lock bit (L) makes the cfg byte + pmpaddr
+                    // read-only; TOR on entry i locks pmpaddr[i-1] as well.
+                    `CSR_PMPCFG0:   pmpcfg_q[0] <= pmpcfg_write_mask(pmpcfg_q[0], new_val);
+                    `CSR_PMPCFG1:   pmpcfg_q[1] <= pmpcfg_write_mask(pmpcfg_q[1], new_val);
+                    `CSR_PMPCFG2:   pmpcfg_q[2] <= pmpcfg_write_mask(pmpcfg_q[2], new_val);
+                    `CSR_PMPCFG3:   pmpcfg_q[3] <= pmpcfg_write_mask(pmpcfg_q[3], new_val);
+                    `CSR_PMPADDR0:  if (!pmpaddr_locked[0])  pmpaddr_q[0]  <= new_val;
+                    `CSR_PMPADDR1:  if (!pmpaddr_locked[1])  pmpaddr_q[1]  <= new_val;
+                    `CSR_PMPADDR2:  if (!pmpaddr_locked[2])  pmpaddr_q[2]  <= new_val;
+                    `CSR_PMPADDR3:  if (!pmpaddr_locked[3])  pmpaddr_q[3]  <= new_val;
+                    `CSR_PMPADDR4:  if (!pmpaddr_locked[4])  pmpaddr_q[4]  <= new_val;
+                    `CSR_PMPADDR5:  if (!pmpaddr_locked[5])  pmpaddr_q[5]  <= new_val;
+                    `CSR_PMPADDR6:  if (!pmpaddr_locked[6])  pmpaddr_q[6]  <= new_val;
+                    `CSR_PMPADDR7:  if (!pmpaddr_locked[7])  pmpaddr_q[7]  <= new_val;
+                    `CSR_PMPADDR8:  if (!pmpaddr_locked[8])  pmpaddr_q[8]  <= new_val;
+                    `CSR_PMPADDR9:  if (!pmpaddr_locked[9])  pmpaddr_q[9]  <= new_val;
+                    `CSR_PMPADDR10: if (!pmpaddr_locked[10]) pmpaddr_q[10] <= new_val;
+                    `CSR_PMPADDR11: if (!pmpaddr_locked[11]) pmpaddr_q[11] <= new_val;
+                    `CSR_PMPADDR12: if (!pmpaddr_locked[12]) pmpaddr_q[12] <= new_val;
+                    `CSR_PMPADDR13: if (!pmpaddr_locked[13]) pmpaddr_q[13] <= new_val;
+                    `CSR_PMPADDR14: if (!pmpaddr_locked[14]) pmpaddr_q[14] <= new_val;
+                    `CSR_PMPADDR15: if (!pmpaddr_locked[15]) pmpaddr_q[15] <= new_val;
                     default: /* no write */ ;
                 endcase
             end

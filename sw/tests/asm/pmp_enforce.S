@@ -90,6 +90,32 @@ ro_store:
     li   t2, 0xAABBCCDD
     bne  t1, t2, fail
 
+    // WARL lock enforcement: pmpaddr0 and pmpcfg0[byte 0] have L=1, so
+    // writes must NOT stick. Writes to pmpaddr1 (L=1 too) must stick only
+    // via pmpcfg1+ reprogramming — but entry 1's L=1 locks pmpaddr1 as well.
+    // We verify: after trying to overwrite pmpaddr0 and pmpcfg0[byte0], the
+    // original values remain.
+    csrr t1, pmpaddr0
+    li   t2, PMPADDR0_VAL
+    bne  t1, t2, fail            // sanity: baseline matches
+
+    // Try to overwrite pmpaddr0 with garbage.
+    li   t0, 0xDEADBEEF
+    csrw pmpaddr0, t0
+    csrr t1, pmpaddr0
+    bne  t1, t2, fail            // L=1 should have rejected the write
+
+    // Try to clobber pmpcfg0 entirely — byte 0 should stay at 0x99 (L=1),
+    // bytes 1/2 should also stay (L=1 on entries 1 and 2), byte 3 can change.
+    csrr t1, pmpcfg0
+    li   t2, PMPCFG0_VAL
+    bne  t1, t2, fail
+
+    li   t0, 0x00000000          // try clearing everything
+    csrw pmpcfg0, t0
+    csrr t1, pmpcfg0
+    bne  t1, t2, fail            // bytes 0/1/2 locked, byte 3 was already 0
+
     // All good — exit PASS.
     la   t0, pass_msg
     jal  ra, puts
