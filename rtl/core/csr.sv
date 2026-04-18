@@ -254,9 +254,14 @@ module csr (
 
     // Pure function of (csr_op, csr_addr, priv_mode_q) — breaks a
     // combinational cycle between csr_en and trap composition in the core.
+    // TVM=1 traps any S-mode access to satp as illegal.
+    wire tvm_blocks_satp = (csr_addr == `CSR_SATP)
+                           && (priv_mode_q == `PRV_S)
+                           && mstatus_q[`MSTATUS_TVM_BIT];
     assign csr_illegal = !addr_valid
                          || !priv_ok
-                         || (does_write && is_read_only_space);
+                         || (does_write && is_read_only_space)
+                         || tvm_blocks_satp;
 
     // ------------- write logic -------------
     wire do_write = csr_en && does_write && !csr_illegal;

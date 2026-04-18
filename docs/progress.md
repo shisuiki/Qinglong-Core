@@ -2,6 +2,27 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-2e: ifetch-translation test + multicycle S-mode hardening
+
+### What shipped
+- **`sw/tests/asm/mmu_ifetch.S`** — SV32 instruction-fetch test under S-mode. Sets up SRAM identity superpage + a 4 KiB leaf at VA `0x82000000` (R|X=1 → PA `0x80002000`) and a second leaf at VA `0x82001000` (R|X=0, same PA). M-mode stages a tiny function at the PA, MRETs into S-mode at each VA, and verifies:
+  - Positive path: function executes, writes `0xCAFEF00D` witness, ECALLs back → mcause=9 (S-ECALL).
+  - Negative path: ifetch through non-executable leaf → mcause=12 (INSN_PAGE_FAULT), mepc = faulting VA.
+  - mtvec handler uses `s0`/`s1` as (expected-cause, landing-pc) handoff and forces `MPP=M` before returning so the M-mode trampoline can drive the next case.
+- **ECALL cause by current privilege (`rtl/core/core_multicycle.sv`)**. Multicycle hard-coded `CAUSE_ECALL_FROM_M` for every ECALL; now switches on `priv_mode_v` to return U/S/M causes correctly. Pre-fix, an S-mode ECALL raised mcause=11, masking the bug.
+- **TVM / SRET / MRET gating in multicycle decode (`rtl/core/core_multicycle.sv`)**. `SFENCE.VMA` illegal in U-mode and from S-mode with TVM=1; `MRET` illegal outside M-mode. Mirrors the pipeline gates added in 6C-4 so multicycle behaves identically when run in S-mode.
+- **`satp` access TVM-gated in the CSR file (`rtl/core/csr.sv`)**. `csr_illegal` now OR's in `(csr_addr == CSR_SATP && priv == S && mstatus.TVM)` so both cores reject S-mode satp reads/writes under TVM=1 without needing per-core decode duplication.
+
+### Tests
+- **`mmu_ifetch.elf`**: PASS on both cores (multicycle: 27,176 cycles; pipeline: 25,114 cycles).
+- **Sim regression (multicycle)**: 73/76, unchanged. Remaining failures are `ma_data`, `breakpoint`, and `rv32mi-p-illegal` (latter deferred — needs SRET decode in multicycle).
+- **Sim regression (pipeline)**: 74/76, unchanged. Failures are `ma_data` + `breakpoint`.
+- **Other MMU tests** (`mmu_sv32`, `mmu_pagefault`): PASS on both cores, unchanged cycle counts.
+
+### Residuals (deferred)
+- Multicycle SRET decode (same as 6C-4 residual — would close the last 73→74 gap).
+- `mmu_ifetch.S` doesn't exercise the R|X=0|U=1 case from S-mode without SUM — covered by the dmem variant in `mmu_pagefault.S`, which reaches the same `tlb_deny` path.
+
 ## 2026-04-18 — Stage 6C-4: TVM/TSR enforcement + interrupt-priority fix
 
 ### What shipped

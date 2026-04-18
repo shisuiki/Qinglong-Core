@@ -353,6 +353,9 @@ module core_multicycle #(
             if (is_sfence) begin
                 // SFENCE.VMA rs1, rs2. rs1/rs2 are operands; rd must be 0.
                 if (rd_i != 5'd0) illegal_opcode = 1'b1;
+                if (priv_mode_v == `PRV_U) illegal_opcode = 1'b1;
+                // TVM=1 traps S-mode SFENCE.VMA as illegal.
+                if (priv_mode_v == `PRV_S && mstatus_tvm_v) illegal_opcode = 1'b1;
             end else begin
                 // ECALL (0x000), EBREAK (0x001), MRET (0x302), WFI (0x105).
                 case (instr_q[31:20])
@@ -361,6 +364,9 @@ module core_multicycle #(
                 endcase
                 // rs1 and rd must be zero for these
                 if (rd_i != 5'd0 || rs1_i != 5'd0) illegal_opcode = 1'b1;
+                // MRET requires M-mode.
+                if (instr_q[31:20] == 12'h302 && priv_mode_v != `PRV_M)
+                    illegal_opcode = 1'b1;
             end
         end
     end
@@ -517,7 +523,11 @@ module core_multicycle #(
         exec_tval  = 32'd0;
         if (is_ecall) begin
             exec_trap  = 1'b1;
-            exec_cause = `CAUSE_ECALL_FROM_M;
+            unique case (priv_mode_v)
+                `PRV_U:  exec_cause = `CAUSE_ECALL_FROM_U;
+                `PRV_S:  exec_cause = `CAUSE_ECALL_FROM_S;
+                default: exec_cause = `CAUSE_ECALL_FROM_M;
+            endcase
         end else if (is_ebreak) begin
             exec_trap  = 1'b1;
             exec_cause = `CAUSE_BREAKPOINT;
