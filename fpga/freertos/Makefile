@@ -17,6 +17,14 @@ PROG_TCL   := ../scripts/prog_axi_hello.tcl
 
 VIVADO_BATCH_FLAGS := -mode batch
 
+# CORE=pipeline selects the 5-stage pipeline core; default is multicycle.
+CORE ?=
+ifeq ($(CORE),pipeline)
+USE_PIPELINE_CORE := 1
+else
+USE_PIPELINE_CORE :=
+endif
+
 .PHONY: synth prog clean mem
 
 mem: $(MEM)
@@ -29,6 +37,7 @@ synth: $(MEM)
 	@echo "==> sourcing Vivado settings and running $(BUILD_TCL)"
 	. $(VIVADO_SETTINGS) && \
 	    SRAM_INIT_FILE=$(abspath $(MEM)) \
+	    USE_PIPELINE_CORE=$(USE_PIPELINE_CORE) \
 	    vivado $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/vivado.log \
 	        -journal $(BUILD_DIR)/vivado.jou \

@@ -28,6 +28,7 @@ set src_list [list \
     [file join $repo_dir rtl core mul_unit.sv]        \
     [file join $repo_dir rtl core div_unit.sv]        \
     [file join $repo_dir rtl core core_multicycle.sv] \
+    [file join $repo_dir rtl core core_pipeline.sv]   \
     [file join $repo_dir rtl mem  sram_dp.sv]         \
     [file join $repo_dir rtl soc  mmio.sv]            \
     [file join $repo_dir rtl soc  clint.sv]           \
@@ -89,8 +90,22 @@ read_xdc $src_xdc
 # Bring the IP's synthesized checkpoint and wrapper into the design.
 read_ip [file join $ip_dir axi_uartlite_0 axi_uartlite_0.xci]
 
-synth_design -top $top -part $part -include_dirs $inc_dir \
-             -generic SRAM_INIT_FILE=$init_file
+set use_pipeline 0
+if {[info exists ::env(USE_PIPELINE_CORE)] && $::env(USE_PIPELINE_CORE) ne "" && $::env(USE_PIPELINE_CORE) ne "0"} {
+    set use_pipeline 1
+    puts "==> build_axi_hello: core       = pipeline (USE_PIPELINE_CORE)"
+} else {
+    puts "==> build_axi_hello: core       = multicycle (default)"
+}
+
+if {$use_pipeline} {
+    synth_design -top $top -part $part -include_dirs $inc_dir \
+                 -generic SRAM_INIT_FILE=$init_file \
+                 -verilog_define USE_PIPELINE_CORE
+} else {
+    synth_design -top $top -part $part -include_dirs $inc_dir \
+                 -generic SRAM_INIT_FILE=$init_file
+}
 write_checkpoint -force post_synth.dcp
 report_utilization -file post_synth_util.rpt
 
