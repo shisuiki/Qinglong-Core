@@ -156,6 +156,8 @@ module mmu (
     typedef struct packed {
         logic        valid;
         logic        is_sp;      // 1 = 4 MiB superpage (ignore vpn[9:0])
+        logic [8:0]  asid;       // ASID captured at fill (from satp[30:22])
+        logic        g;          // global mapping (from PTE[5]) — ignores ASID
         logic [19:0] vpn;        // [19:10]=VPN[1], [9:0]=VPN[0]
         logic [21:0] ppn;        // [21:10]=ppn1, [9:0]=ppn0
         logic        r, w, x, u, a, d;
@@ -166,8 +168,11 @@ module mmu (
     logic [$clog2(TLB_N)-1:0]   if_repl_q, dm_repl_q;
 
     // Lookup — fully-associative match with superpage mask on VPN[0].
-    function automatic logic tlb_match (tlb_entry_t e, logic [31:0] va);
+    // ASID check: entry is global OR entry's ASID matches current satp.ASID.
+    function automatic logic tlb_match (tlb_entry_t e, logic [31:0] va,
+                                        logic [8:0] cur_asid);
         return e.valid &&
+               (e.g || (e.asid == cur_asid)) &&
                (e.vpn[19:10] == va[31:22]) &&
                (e.is_sp || (e.vpn[9:0] == va[21:12]));
     endfunction
@@ -178,7 +183,7 @@ module mmu (
         if_tlb_hit   = 1'b0;
         if_tlb_hit_e = '0;
         for (int unsigned i = 0; i < TLB_N; i++) begin
-            if (tlb_match(if_tlb_q[i], if_core_req_addr)) begin
+            if (tlb_match(if_tlb_q[i], if_core_req_addr, satp_i[30:22])) begin
                 if_tlb_hit   = 1'b1;
                 if_tlb_hit_e = if_tlb_q[i];
             end
@@ -191,7 +196,7 @@ module mmu (
         dm_tlb_hit   = 1'b0;
         dm_tlb_hit_e = '0;
         for (int unsigned i = 0; i < TLB_N; i++) begin
-            if (tlb_match(dm_tlb_q[i], dm_core_req_addr)) begin
+            if (tlb_match(dm_tlb_q[i], dm_core_req_addr, satp_i[30:22])) begin
                 dm_tlb_hit   = 1'b1;
                 dm_tlb_hit_e = dm_tlb_q[i];
             end
@@ -237,6 +242,7 @@ module mmu (
     wire        pte_w      = pte[2];
     wire        pte_x      = pte[3];
     wire        pte_u      = pte[4];
+    wire        pte_g      = pte[5];
     wire        pte_a      = pte[6];
     wire        pte_d      = pte[7];
     wire [9:0]  pte_ppn0   = pte[19:10];
@@ -359,6 +365,8 @@ module mmu (
                                 if_tlb_fill           = 1'b1;
                                 if_tlb_fill_e.valid   = 1'b1;
                                 if_tlb_fill_e.is_sp   = 1'b1;
+                                if_tlb_fill_e.asid    = satp_i[30:22];
+                                if_tlb_fill_e.g       = pte_g;
                                 if_tlb_fill_e.vpn     = {ptw_va_q[31:22], 10'd0};
                                 if_tlb_fill_e.ppn     = {pte_ppn1[11:0], 10'd0};
                                 if_tlb_fill_e.r       = pte_r;
@@ -376,6 +384,8 @@ module mmu (
                                 dm_tlb_fill           = 1'b1;
                                 dm_tlb_fill_e.valid   = 1'b1;
                                 dm_tlb_fill_e.is_sp   = 1'b1;
+                                dm_tlb_fill_e.asid    = satp_i[30:22];
+                                dm_tlb_fill_e.g       = pte_g;
                                 dm_tlb_fill_e.vpn     = {ptw_va_q[31:22], 10'd0};
                                 dm_tlb_fill_e.ppn     = {pte_ppn1[11:0], 10'd0};
                                 dm_tlb_fill_e.r       = pte_r;
@@ -416,6 +426,8 @@ module mmu (
                             if_tlb_fill           = 1'b1;
                             if_tlb_fill_e.valid   = 1'b1;
                             if_tlb_fill_e.is_sp   = 1'b0;
+                            if_tlb_fill_e.asid    = satp_i[30:22];
+                            if_tlb_fill_e.g       = pte_g;
                             if_tlb_fill_e.vpn     = {ptw_va_q[31:22], ptw_va_q[21:12]};
                             if_tlb_fill_e.ppn     = {pte_ppn1[11:0], pte_ppn0[9:0]};
                             if_tlb_fill_e.r       = pte_r;
@@ -433,6 +445,8 @@ module mmu (
                             dm_tlb_fill           = 1'b1;
                             dm_tlb_fill_e.valid   = 1'b1;
                             dm_tlb_fill_e.is_sp   = 1'b0;
+                            dm_tlb_fill_e.asid    = satp_i[30:22];
+                            dm_tlb_fill_e.g       = pte_g;
                             dm_tlb_fill_e.vpn     = {ptw_va_q[31:22], ptw_va_q[21:12]};
                             dm_tlb_fill_e.ppn     = {pte_ppn1[11:0], pte_ppn0[9:0]};
                             dm_tlb_fill_e.r       = pte_r;

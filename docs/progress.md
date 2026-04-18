@@ -2,6 +2,22 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-18 — Stage 6C-6: ASID-tagged TLB + global-page bit
+
+### What shipped
+- **`rtl/core/mmu.sv`**. Extended `tlb_entry_t` with `asid[8:0]` and `g` fields. `tlb_match` now requires `(e.g || (e.asid == current_satp.ASID))` in addition to the VPN / superpage checks. All four TLB fill sites (L1 superpage if/dm, L0 page if/dm) capture the live `satp_i[30:22]` ASID and PTE[5] G bit into the entry at fill time. `pte_g` was added to the PTE-field unpack next to `pte_a`/`pte_d`.
+- **`sw/tests/asm/mmu_asid.S`** — ASID isolation regression. Builds two root+L0 page tables that agree on SRAM and MMIO identity superpages but map VA `0x81000000` to different physical pages (PATTERN_A vs PATTERN_B). Drives four satp switches *without* SFENCE.VMA between them — ASID=1 with PT1, then ASID=2 with PT2, then back to ASID=1, then ASID=2. If the TLB stale-hit a prior ASID's entry, round 2 would return PATTERN_A instead of PATTERN_B and the test fails loudly; with ASID tagging round 2 misses, walks PT2, and reads the correct pattern. Rounds 3–4 further confirm the prior-ASID entries are still resident (no spurious eviction).
+
+### Tests
+- **`mmu_asid.elf`**: PASS on both cores.
+- **Other MMU/PMP tests** (`mmu_sv32`, `mmu_pagefault`, `mmu_ifetch`, `s_irq`, `s_exc_deleg`, `pmp_enforce`): PASS on both cores, unchanged.
+- **Full regression** (`make sim-all` both cores): **74/76**, unchanged. Residuals still `ma_data` and `breakpoint`.
+- **Full formal suite** (40 checks): **40/40 PASS**. Wider `tlb_entry_t` had no effect on `insn_*`/`reg`/`causal` — as expected, since the wrapper constrains `satp`/`priv` but doesn't drive explicit MMU behaviour for those checks.
+
+### Residuals (deferred)
+- SFENCE.VMA still flushes the full TLB on any issue. rs1 (VA target) and rs2 (ASID target) are ignored. Per-VPN / per-ASID selective flush is a future refinement; the spec allows over-flushing.
+- ASID width is the full 9 bits SV32 allows, but no CSR-visible `ASID_WIDTH` WARL negotiation — software sees whatever fits in satp[30:22].
+
 ## 2026-04-18 — Stage 6C-3e: formal-suite IRQ bubble fix
 
 ### What shipped
