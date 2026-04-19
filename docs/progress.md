@@ -31,15 +31,24 @@ Chronological log of what's been done and what's next. Newest entries at the top
 - **FPGA synth + opt + place + route + bitstream**: pass.
   - Pipeline core: WNS = −0.309 ns, TNS = −0.418 ns, 3 failing endpoints (intra-MIG calib FSM at 166 MHz), zero hold violations.
   - Utilisation: 35.7% LUTs (11,642 / 32,600), 12.7% FFs (8,311 / 65,200).
-- **Silicon** — bitstream has not been flashed yet; memtest is the next thing once it lands.
+- **Silicon (2026-04-19 ~14:06)**: flashed `axi_hello.bit` (built with `ELF=sw/tests/c/memtest.elf`) over JTAG, watched `/dev/ttyUSB1` at 115200:
+
+      DDR3 memtest @ 0x40000000 (1Gbit/128MB on Urbana)
+      phase 1 single-word ... ok
+      phase 2 walking-1s  ... ok
+      phase 3 4KB pattern ... ok
+      PASS
+
+  First run found an unrelated SoC address-decode bug: `soc_top.dm_is_axi` only matched `addr[31:28] == 4'hC` (UartLite window), so writes to the DDR base at `0x4000_0000` fell through to the bad-address path, faulted, and hung the core in an infinite trap loop (mtvec defaults to 0, which also faults). Fixed by extending `dm_is_axi` to `(addr[31:28]==4'h4) || (addr[31:28]==4'hC)` and letting the external axi_crossbar handle the finer-grain decode. That's the fix that made memtest PASS.
 
 ### Caveats
-- The remaining −0.309 ns on the MIG `u_ddr_phy_init` FSM is a real intra-MIG violation that the OOC synth didn't see because the in-context placer moved MIG's logic around to make room for user fabric. Calibration FSMs are tolerant (they wait on explicit done signals, not fixed-cycle step counts), so this probably works on silicon; if calibration misbehaves, the fix is either an implementation strategy pass (`Performance_ExtraTimingOpt`) or a Pblock that keeps MIG's FSM packed.
-- `memtest.c` still hasn't run against real DDR. The bitstream produces a plausible-looking DDR controller in sim-level constraints, but the "DDR actually reads back what we wrote" invariant is entirely silicon-side.
+- The remaining −0.309 ns on the MIG `u_ddr_phy_init` FSM is a real intra-MIG violation that the OOC synth didn't see because the in-context placer moved MIG's logic around to make room for user fabric. Calibration FSMs are tolerant (they wait on explicit done signals, not fixed-cycle step counts), and the silicon run confirms calibration completed cleanly — memtest only starts after `init_calib_complete` asserts, gated by `soc_rst_sync`.
 - The Makefile default for `CORE` is now `pipeline` for axi_hello only. `fpga/freertos/Makefile` still defaults to multicycle and closes at +0.537 ns WNS there — that design has no DDR/MIG glue to crowd placement.
+- memtest only probes 4 KiB at the base of the 128 MB window. It's a bring-up smoke test, not a full-span confidence check; a longer test is cheap to author once Stage 7c lands.
+- Instruction fetch is still SRAM-only (`*.mem` baked into BRAMs at synth time). Fetching from DDR will matter when OpenSBI/Linux land in 7f+, and that needs either a boot ROM + copy-to-DDR or ifetch routed through the AXI master too.
 
 ### Next step
-Flash the bitstream to Urbana, run `memtest.elf`, read /dev/ttyUSB1 for the three-phase pass/fail report. If calibration doesn't complete, drop to `Performance_ExtraTimingOpt` for MIG and rebuild. If memtest passes, Stage 7b is closed and 7c (D-cache against DDR) opens.
+Stage 7b closed. Next: 7c (D-cache against DDR) — exercises the DDR path under realistic pressure (line fills, dirty writebacks) and validates that burst AXI reads from MIG work the same way the single-beat path now does.
 
 ## 2026-04-19 — Stage 7a: AXI4-full bus refactor (prep for MIG/DDR)
 
