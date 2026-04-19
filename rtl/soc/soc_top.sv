@@ -263,11 +263,13 @@ module soc_top #(
     // ---------- dmem address decode ----------
     // CLINT: addr[31:20] == 12'h020 → 1 MiB @ 0x0200_0000
     // SRAM:  addr[31:16] == 16'h8000 → port B
-    // AXI:   addr[31:28] == 4'hC    → 256 MiB window @ 0xC000_0000
+    // AXI:   addr[31:28] == 4'h4 (DDR via MIG @ 0x4000_0000/128 MiB)
+    //     or addr[31:28] == 4'hC (UART-lite via xbar @ 0xC000_0000/4 KiB).
+    //     The external axi_crossbar does the finer-grain decode + DECERR.
     // MMIO:  addr[31:16] == 16'hD058 → MMIO block
     wire dm_is_clint = (dm_req_addr[31:20] == 12'h020);
     wire dm_is_sram  = (dm_req_addr[31:16] == 16'h8000);
-    wire dm_is_axi   = (dm_req_addr[31:28] == 4'hC);
+    wire dm_is_axi   = (dm_req_addr[31:28] == 4'h4) || (dm_req_addr[31:28] == 4'hC);
     wire dm_is_mmio  = (dm_req_addr[31:16] == 16'hD058);
 
     // Dmem-side signals for the SRAM region. Under USE_DCACHE they terminate
