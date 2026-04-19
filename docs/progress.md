@@ -2,6 +2,38 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-19 — Stage 7b WIP: MIG7 DDR3L infra in place, router blocked on byte_lane_D
+
+### Status
+**Infrastructure complete; bitstream not produced.** Synth + opt + place all close cleanly with the Urbana DDR3 pinout from the master XDC. The router fails inside MIG with 4 unroutable clock-distribution pins in `ddr_byte_lane_D` (`phaser_in`, `iserdes_clkdiv`, `oserdes_clk`). Root cause: one or more of the pin-to-byte-lane assignments in `mig_urbana.prj` lands a clock-capable signal on a non-CC site within bank 34 lane D, so the BUFIO/PLL fan-out can't reach the SERDES it owns. Fixing this requires the authoritative Urbana board layer (RealDigital schematic / official `mig.prj`) to confirm which package pins map to which BL position — the Vivado-shipped board store does not include Urbana, and the project repo only carries top-level pin constraints, no DDR3 lane map.
+
+### What shipped (build-ready, not bitstream-validated)
+- **`fpga/ip/mig_urbana.prj`** (new). MIG7 IP project file describing the on-board ISSI IS43TR16640CL-125JBL (1Gbit, 64M×16 DDR3L 1.35V, modelled as `MT41K64M16XX-125`). 13 row × 10 col × 3 bank layout = 128 MB. Pin assignments verbatim from the RealDigital master XDC, all on the HR bank — SSTL135 / DIFF_SSTL135, no DCI, internal VREF. `<SystemClock>Differential` sourced from the C1/B1 LVDS_25 oscillator. **Speed point = 666 MT/s** (TimePeriod 3000 ps, ui_clk ≈ 83.3 MHz, 4:1 PHY ratio): MIG's `time_periods.csv` locks Spartan-7 -1 DDR3L Components to the [3000, 3300] ps window — anything outside is rejected — so we run at the top of the supported range.
+- **`fpga/scripts/build_axi_hello.tcl`**. New `create_ip` blocks for `axi_crossbar_0` (1 SI / 2 MI / AXI4 / 32-bit / ID=4) and `mig_ddr3_0` (config from `mig_urbana.prj`). The crossbar can only carry one PROTOCOL setting, so the M01→UartLite branch keeps a downstream `axi_protocol_converter_0` (carried over from Stage 7a) — there is no "AXI4-Lite per master" property on `axi_crossbar`, only on the legacy `axi_interconnect`. UartLite ACLK_FREQ_HZ moved to 83.33 MHz to match ui_clk.
+- **`rtl/fpga/axi_hello_top.sv`**. Major rewrite for the new fabric. The N15 100 MHz oscillator is now used only for an `alive_clk` heartbeat LED so a configured FPGA is visible even if MIG never calibrates; the SoC, crossbar, protocol converter, and UartLite all run on MIG's `ui_clk`. SoC reset is held until both `ui_clk_sync_rst` releases AND `init_calib_complete` asserts. 35 new top-level ports for DDR3 + sys_clk_p/n, all inout/output, with widths matching what MIG generates (`ddr3_addr[12:0]` for the 1Gbit part).
+- **`rtl/fpga/axi_hello_top.sv`** (cont.). Crossbar M-side concatenation (M00 = MIG, M01 = uart-via-pc) follows the IP's "M00 in low bits, M01 in high bits" convention. Crossbar drops AXI IDs at the master interface (single SI, in-order responses), so MIG.s_axi_awid/arid and proto-converter.s_axi_awid/arid are tied to 0; the crossbar tracks responses by arrival order. `mig_awregion`/`mig_arregion` are unused (MIG has no region port).
+- **`fpga/constraints/urbana_axi_hello.xdc`**. Added `sys_clk_p`/`sys_clk_n` on C1/B1 with LVDS_25. DDR3 pin LOC + IOSTANDARD constraints stay inside the MIG IP XDC — the user XDC only has to declare the user-facing top-level pins.
+- **`sw/tests/c/memtest.c`** (new). Three-phase smoke test against the new DDR window at 0x4000_0000: scattered single-word write/read; walking-1s on a single word; 4 KB byte-pattern over one row. Reports per-phase pass/fail via UartLite, then exits via the legacy MMIO port.
+- **`fpga/scripts/gen_ip_only.tcl`** (new). Mirror of the IP-creation half of the build flow — useful when you only want to regenerate the wrappers (e.g. to inspect MIG's actual port list before re-wiring the top).
+
+### Why now
+Stage 7g needs Linux in DDR — too big for the 16 KB on-chip SRAM. Bringing MIG up first as a standalone bus slave (with no software actually using it) lets us prove the synth/impl/bitstream path closes before any kernel work depends on it.
+
+### Tests
+- **Sim regression unchanged** (74/76 both cores, 7/7 C tests including hello_axi). The behavioural router from Stage 7a still drives the sim path — Verilator can't run MIG, so the FPGA-only IPs are not part of the sim build.
+- **`memtest.elf` builds clean** (text 1265 B). Not run on Verilator (DDR not modelled in sim); first real run is on silicon once 7b's bitstream is flashed.
+- **FPGA synth + opt + place**: pass. Top synth done, opt/place clean (after adding `CLOCK_DEDICATED_ROUTE BACKBONE` on `*u_ddr3_clk_ibuf/sys_clk_ibufg*` because sys_clk_p/n on C1/B1 is in bank 35 while MIG sits in bank 34).
+- **FPGA route**: fails. `ERROR: [Route 35-7] Design has 4 unroutable pins` — clock-infra nets inside `byte_lane_D`. Bitstream not produced.
+
+### Caveats
+- **MIG input-clock-period rounding** — MIG complains "Setting nearest possible Input Clock Period value 102.564" because 333 MHz output from a 100 MHz input doesn't fall on a clean integer PLL ratio. The IP configures itself as if the input were ~97.5 MHz; the actual memory frequency at 100 MHz will land ~2.5% higher than the design target. We're well inside the rated chip range either way, but if calibration misbehaves on silicon we may have to insert a user MMCM in front to bring the input to a value MIG accepts cleanly.
+- **Crossbar ID handling** — `axi_crossbar` (the modern IP, vs. the legacy `axi_interconnect`) drops the ID on its master interfaces and tracks responses by ordering. Single-SI, in-order responses make this a non-issue today, but if we ever add a second master at the SoC fabric level the ordering invariant will need a re-think.
+- **N15 clock currently unused by the SoC** — only the heartbeat LED hangs off it. If MIG silicon bring-up turns out to need an MMCM-pre-multiplied input, we'll route it through there instead.
+- No software actually exercises DDR yet on silicon. `memtest` is the next thing to flash, but only after the bitstream lands and we know calibration completes.
+
+### Next step (needs Urbana board input)
+To unblock routing, we need either: the official RealDigital Urbana `mig.prj` (definitive lane mapping); or the board schematic / Spartan-7 csga324 datasheet pin-to-IOB-site map so we can re-assign data byte 0/1 + address pins to lanes that line each DQS pair on the lane's MRCC site. Once that lands, re-run `make synth` from `fpga/axi_hello/` — synth and place are already green, only the pin map blocks routing.
+
 ## 2026-04-19 — Stage 7a: AXI4-full bus refactor (prep for MIG/DDR)
 
 ### What shipped

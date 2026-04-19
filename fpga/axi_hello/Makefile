@@ -1,10 +1,15 @@
 # -----------------------------------------------------------------------------
 # Makefile for the Urbana Stage 5 AXI-UART hello bringup.
 #
-#   make hello_axi.mem    (re)generate BRAM init image from sw/tests/c/hello_axi.elf
+#   make mem              (re)generate BRAM init image from $(ELF) (default
+#                         hello_axi.elf; override with ELF=...)
 #   make synth            vivado non-project flow → build/axi_hello/axi_hello.bit
 #   make prog             program over JTAG
 #   make clean            wipe artifacts
+#
+# Examples:
+#   make synth                                          # hello_axi
+#   make synth ELF=$(REPO_DIR)/sw/tests/c/memtest.elf   # 7b memtest
 #
 # RTL lives under $repo/rtl/.
 # -----------------------------------------------------------------------------
@@ -19,7 +24,7 @@ BUILD_DIR  := ../build/axi_hello
 BITSTREAM  := $(BUILD_DIR)/axi_hello.bit
 
 ELF        ?= $(REPO_DIR)/sw/tests/c/hello_axi.elf
-MEM        := hello_axi.mem
+MEM        := $(notdir $(basename $(ELF))).mem
 
 BUILD_TCL  := ../scripts/build_axi_hello.tcl
 PROG_TCL   := ../scripts/prog_axi_hello.tcl

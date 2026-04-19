@@ -1,14 +1,15 @@
 # -----------------------------------------------------------------------------
 # build_axi_hello.tcl
-# Non-project Vivado build flow for the Stage 5 AXI-UART hello SoC on Urbana.
+# Non-project Vivado build flow for the Stage 7b AXI-UART + DDR3 SoC on Urbana.
 #
 # Invoked from /home/lain/qianyu/riscv_soc/fpga/axi_hello/ via:
 #   vivado -mode batch -source ../scripts/build_axi_hello.tcl
 #
-# Differences vs build_hello.tcl:
-#   - targets `axi_hello_top` (which exposes the soc_top AXI-Lite master port)
-#   - creates AMD `axi_uartlite` IP (module axi_uartlite_0) in the Vivado
-#     managed-IP cache under $build/ip, synthesises it OOC, and links it
+# Differences vs the Stage 7a TCL:
+#   - drops the standalone axi_protocol_converter (the crossbar handles that
+#     inline for the UartLite master)
+#   - adds AMD `axi_crossbar` (1 SI, 2 MI: MIG @ 0x4000_0000, Uart @ 0xC000_0000)
+#   - adds AMD `mig_7series` configured from $repo/fpga/ip/mig_urbana.prj
 # -----------------------------------------------------------------------------
 
 set hello_dir [file normalize [pwd]]
@@ -30,17 +31,19 @@ set src_list [list \
     [file join $repo_dir rtl core core_multicycle.sv] \
     [file join $repo_dir rtl core core_pipeline.sv]   \
     [file join $repo_dir rtl core mmu.sv]             \
-    [file join $repo_dir rtl mem   sram_dp.sv]         \
-    [file join $repo_dir rtl cache icache.sv]          \
-    [file join $repo_dir rtl cache dcache.sv]          \
-    [file join $repo_dir rtl soc   mmio.sv]            \
-    [file join $repo_dir rtl soc  clint.sv]           \
-    [file join $repo_dir rtl soc  axi4_master.sv]     \
-    [file join $repo_dir rtl soc  soc_top.sv]         \
-    [file join $repo_dir rtl fpga axi_hello_top.sv]   \
+    [file join $repo_dir rtl core pmp.sv]             \
+    [file join $repo_dir rtl mem   sram_dp.sv]        \
+    [file join $repo_dir rtl cache icache.sv]         \
+    [file join $repo_dir rtl cache dcache.sv]         \
+    [file join $repo_dir rtl soc   mmio.sv]           \
+    [file join $repo_dir rtl soc   clint.sv]          \
+    [file join $repo_dir rtl soc   axi4_master.sv]    \
+    [file join $repo_dir rtl soc   soc_top.sv]        \
+    [file join $repo_dir rtl fpga  axi_hello_top.sv]  \
 ]
-set src_xdc [file join $fpga_dir constraints urbana_axi_hello.xdc]
-set inc_dir [file join $repo_dir rtl core]
+set src_xdc      [file join $fpga_dir constraints urbana_axi_hello.xdc]
+set inc_dir      [file join $repo_dir rtl core]
+set mig_prj_file [file join $fpga_dir ip mig_urbana.prj]
 
 if {[info exists ::env(SRAM_INIT_FILE)]} {
     set init_file [file normalize $::env(SRAM_INIT_FILE)]
@@ -62,27 +65,56 @@ puts "==> build_axi_hello: build_dir  = $build_dir"
 puts "==> build_axi_hello: part       = $part"
 puts "==> build_axi_hello: top        = $top"
 puts "==> build_axi_hello: init_file  = $init_file"
+puts "==> build_axi_hello: mig_prj    = $mig_prj_file"
 
-# -----------------------------------------------------------------------------
-# Managed-IP project (just to carry the IP generation). Non-project flow below
-# consumes the generated IP synthesis outputs.
-# -----------------------------------------------------------------------------
 set_part $part
 
+# -----------------------------------------------------------------------------
+# axi_uartlite — 115200 8N1 on s_axi_aclk = 50 MHz (= MIG ui_clk).
+# -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:axi_uartlite:2.0 -module_name axi_uartlite_0 -dir $ip_dir
+# UartLite hangs off MIG's ui_clk (≈83 MHz at 666 MT/s, 4:1 PHY ratio).
+# The baud divisor is computed once from this constant — slight rounding on
+# the actual ui_clk is harmless for 115200 8N1.
 set_property -dict [list \
     CONFIG.C_BAUDRATE           {115200} \
-    CONFIG.C_S_AXI_ACLK_FREQ_HZ {50000000} \
+    CONFIG.C_S_AXI_ACLK_FREQ_HZ {83333333} \
     CONFIG.C_DATA_BITS          {8} \
     CONFIG.C_USE_PARITY         {0} \
     CONFIG.C_ODD_PARITY         {0} \
 ] [get_ips axi_uartlite_0]
-
 generate_target {synthesis simulation} [get_ips axi_uartlite_0]
 synth_ip [get_ips axi_uartlite_0]
 
-# AXI4-full → AXI4-Lite shim. soc_top exposes an AXI4-full master; axi_uartlite
-# is AXI4-Lite-only, so a Vivado protocol converter sits between them.
+# -----------------------------------------------------------------------------
+# axi_crossbar — 1 slave (from soc_top, AXI4 full, ID=4) → 2 masters, both
+# AXI4-full.  M01 (UartLite) is downgraded by a downstream axi_protocol_converter.
+#   M00 → MIG  @ 0x4000_0000 / 256 MB
+#   M01 → Uart @ 0xC000_0000 / 4 KB
+# -----------------------------------------------------------------------------
+create_ip -vlnv xilinx.com:ip:axi_crossbar:2.1 -module_name axi_crossbar_0 -dir $ip_dir
+set_property -dict [list \
+    CONFIG.NUM_SI             {1} \
+    CONFIG.NUM_MI             {2} \
+    CONFIG.PROTOCOL           {AXI4} \
+    CONFIG.DATA_WIDTH         {32} \
+    CONFIG.ADDR_WIDTH         {32} \
+    CONFIG.ID_WIDTH           {4} \
+    CONFIG.STRATEGY           {1} \
+    CONFIG.R_REGISTER         {1} \
+    CONFIG.S00_SINGLE_THREAD  {1} \
+    CONFIG.M00_A00_BASE_ADDR  {0x0000000040000000} \
+    CONFIG.M00_A00_ADDR_WIDTH {27} \
+    CONFIG.M01_A00_BASE_ADDR  {0x00000000C0000000} \
+    CONFIG.M01_A00_ADDR_WIDTH {12} \
+] [get_ips axi_crossbar_0]
+generate_target {synthesis simulation} [get_ips axi_crossbar_0]
+synth_ip [get_ips axi_crossbar_0]
+
+# -----------------------------------------------------------------------------
+# axi_protocol_converter — sits between the crossbar's M01 (AXI4) and the
+# axi_uartlite (AXI4-Lite-only) slave.
+# -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 -module_name axi_protocol_converter_0 -dir $ip_dir
 set_property -dict [list \
     CONFIG.SI_PROTOCOL    {AXI4} \
@@ -92,9 +124,21 @@ set_property -dict [list \
     CONFIG.ID_WIDTH       {4} \
     CONFIG.READ_WRITE_MODE {READ_WRITE} \
 ] [get_ips axi_protocol_converter_0]
-
 generate_target {synthesis simulation} [get_ips axi_protocol_converter_0]
 synth_ip [get_ips axi_protocol_converter_0]
+
+# -----------------------------------------------------------------------------
+# MIG7 DDR3L controller — config in fpga/ip/mig_urbana.prj
+# -----------------------------------------------------------------------------
+create_ip -vlnv xilinx.com:ip:mig_7series:4.2 -module_name mig_ddr3_0 -dir $ip_dir
+set_property -dict [list \
+    CONFIG.XML_INPUT_FILE     $mig_prj_file \
+    CONFIG.RESET_BOARD_INTERFACE {Custom} \
+    CONFIG.MIG_DONT_TOUCH_PARAM  {Custom} \
+    CONFIG.BOARD_MIG_PARAM       {Custom} \
+] [get_ips mig_ddr3_0]
+generate_target {synthesis simulation} [get_ips mig_ddr3_0]
+synth_ip [get_ips mig_ddr3_0]
 
 # -----------------------------------------------------------------------------
 # Source RTL
@@ -105,9 +149,10 @@ foreach f $src_list {
 }
 read_xdc $src_xdc
 
-# Bring the IP's synthesized checkpoint and wrapper into the design.
-read_ip [file join $ip_dir axi_uartlite_0 axi_uartlite_0.xci]
+read_ip [file join $ip_dir axi_uartlite_0           axi_uartlite_0.xci]
+read_ip [file join $ip_dir axi_crossbar_0           axi_crossbar_0.xci]
 read_ip [file join $ip_dir axi_protocol_converter_0 axi_protocol_converter_0.xci]
+read_ip [file join $ip_dir mig_ddr3_0               mig_ddr3_0.xci]
 
 set use_pipeline 0
 if {[info exists ::env(USE_PIPELINE_CORE)] && $::env(USE_PIPELINE_CORE) ne "" && $::env(USE_PIPELINE_CORE) ne "0"} {

@@ -11,10 +11,21 @@ set_property CONFIG_VOLTAGE 3.3 [current_design]
 set_property BITSTREAM.Config.SPI_buswidth 4 [current_design]
 
 # -----------------------------------------------------------------------------
-# 100 MHz single-ended oscillator (N15, LVCMOS33)
+# 100 MHz single-ended oscillator (N15, LVCMOS33). Drives only the heartbeat
+# LED — the SoC + AXI fabric run on MIG's ui_clk derived from sys_clk_p/n.
 # -----------------------------------------------------------------------------
 set_property -dict {PACKAGE_PIN N15 IOSTANDARD LVCMOS33} [get_ports clk]
-create_clock -period 10.000 -name sysclk [get_ports clk]
+create_clock -period 10.000 -name alivesys [get_ports clk]
+
+# -----------------------------------------------------------------------------
+# 100 MHz differential oscillator on C1/B1. Pin LOC + IOSTANDARD + create_clock
+# are emitted by the MIG IP XDC (DIFF_SSTL135, 9.75 ns). We only add the
+# CLOCK_DEDICATED_ROUTE override below because on Urbana the DDR3 ref-clock
+# pin is not in the same clock region as the MIG PLL, so Vivado needs an
+# explicit okay to route it via the clock backbone.
+# -----------------------------------------------------------------------------
+set_property CLOCK_DEDICATED_ROUTE BACKBONE \
+    [get_nets -hier -filter {NAME =~ *u_ddr3_clk_ibuf/sys_clk_ibufg*}]
 
 # -----------------------------------------------------------------------------
 # Reset push-button (btn[0], J2, LVCMOS25, ACTIVE-LOW).
