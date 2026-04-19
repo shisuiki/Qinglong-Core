@@ -2,6 +2,33 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-19 — Stage 7a: AXI4-full bus refactor (prep for MIG/DDR)
+
+### What shipped
+- **`rtl/soc/axi4_master.sv`** (new). Replaces `axi_lite_master.sv`. Same single-beat single-outstanding 5-state FSM, but the external interface is full AXI4 (`ID_W`-parameterised `awid/bid/arid/rid`, plus `awlen=0`, `awsize=2` (4 bytes), `awburst=01` (INCR), `awcache=4'b0011` (Modifiable+Bufferable), `awlock=0`, `awqos=0`, `wlast=1`). Constants are wired straight from the shim — the core still issues one word at a time, but the bus shape now matches what MIG7 / `axi_crossbar` / a future cached burst master expect.
+- **`rtl/soc/soc_top.sv`**. External master port renamed `m_axil_*` → `m_axi_*` and widened to AXI4-full. Instances `axi4_master #(.ID_W(4))` instead of `axi_lite_master`.
+- **`rtl/mem/axi4_router_1x2.sv`** (new). Behavioural sim-only 1-master-2-slave router. Master side AXI4-full; slave side AXI4-Lite (drops ID/LEN/LAST). Address decode: `addr[31:16]==16'hC000 && addr[15:13]==3'd0`, slave selected by `addr[12]` — slave 0 at `0xC000_0000`, slave 1 at `0xC000_1000`. Anything outside that window returns DECERR via an internal stub. Per-channel routing latches `sel_w_q`/`sel_r_q` between AW→W→B and AR→R.
+- **`rtl/soc/soc_tb_top.sv`**. Now declares the full set of AXI4 master signals, instances the router, and hangs `axil_uartlite_sim` on slave 0 + `axil_bram_slave #(.WORDS(1024))` on slave 1. The DECERR slot is internal to the router, so the TB stays minimal.
+- **`rtl/fpga/axi_hello_top.sv`**. Updated to the new soc_top port shape and inserts Vivado's free `axi_protocol_converter` IP between `soc_top.m_axi_*` (AXI4-full) and `axi_uartlite_0` (AXI4-Lite-only). The legacy MMIO console wires are still pinned to LEDs for debug.
+- **`fpga/scripts/build_axi_hello.tcl`**. Adds a second `create_ip` block for `axi_protocol_converter_0` (SI=AXI4, MI=AXI4LITE, ID_WIDTH=4, DATA_WIDTH=32, ADDR_WIDTH=32) and a matching `read_ip`. Source list swapped `axi_lite_master.sv` → `axi4_master.sv`.
+- **`sim/Makefile`**. Removed `axi_lite_master.sv`; added `axi4_master.sv` and `axi4_router_1x2.sv`.
+- **Deleted** `rtl/soc/axi_lite_master.sv` — fully superseded.
+
+### Why now
+Stage 7b will bring up the on-board 256 MB DDR3L through Xilinx MIG7, which only speaks AXI4-full. Doing the bus widening as a standalone refactor (single-beat for now) keeps every regression intact, then the burst widening can land naturally with the D-cache (Stage 7c) when DDR refill traffic actually wants it.
+
+### Tests
+- **Multicycle sim regression**: 74/76 (residuals `ma_data` + `breakpoint` unchanged).
+- **Pipeline sim regression**: 74/76 (same residuals, unchanged).
+- **C tests**: 7/7 PASS — including `hello_axi`, which is the only test that actually exercises the new AXI4 master path.
+- **Formal regen**: 40/40 checks generated (full proof not re-run; the refactor doesn't touch any pipeline logic the proofs cover).
+
+### Caveats
+- The router is sim-only and intentionally behavioural — Vivado's `axi_crossbar` will replace it on silicon at Stage 7b.
+- `axi4_master` is still single-beat: `awlen=0`, `wlast=1`. Bursts come in with the D-cache.
+- Verilator does not consume Vivado-IP `.xci`, so the FPGA-only `axi_protocol_converter_0` is hidden behind the FPGA top file rather than the SoC RTL — sim still uses the behavioural router instead.
+- FPGA bitstream not regenerated this commit. Will be exercised once 7b lands and we have a concrete reason to reflash.
+
 ## 2026-04-19 — Stage 6C-9: U-mode MMU integration test
 
 ### What shipped

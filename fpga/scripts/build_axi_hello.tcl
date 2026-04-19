@@ -35,7 +35,7 @@ set src_list [list \
     [file join $repo_dir rtl cache dcache.sv]          \
     [file join $repo_dir rtl soc   mmio.sv]            \
     [file join $repo_dir rtl soc  clint.sv]           \
-    [file join $repo_dir rtl soc  axi_lite_master.sv] \
+    [file join $repo_dir rtl soc  axi4_master.sv]     \
     [file join $repo_dir rtl soc  soc_top.sv]         \
     [file join $repo_dir rtl fpga axi_hello_top.sv]   \
 ]
@@ -81,6 +81,21 @@ set_property -dict [list \
 generate_target {synthesis simulation} [get_ips axi_uartlite_0]
 synth_ip [get_ips axi_uartlite_0]
 
+# AXI4-full → AXI4-Lite shim. soc_top exposes an AXI4-full master; axi_uartlite
+# is AXI4-Lite-only, so a Vivado protocol converter sits between them.
+create_ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 -module_name axi_protocol_converter_0 -dir $ip_dir
+set_property -dict [list \
+    CONFIG.SI_PROTOCOL    {AXI4} \
+    CONFIG.MI_PROTOCOL    {AXI4LITE} \
+    CONFIG.DATA_WIDTH     {32} \
+    CONFIG.ADDR_WIDTH     {32} \
+    CONFIG.ID_WIDTH       {4} \
+    CONFIG.READ_WRITE_MODE {READ_WRITE} \
+] [get_ips axi_protocol_converter_0]
+
+generate_target {synthesis simulation} [get_ips axi_protocol_converter_0]
+synth_ip [get_ips axi_protocol_converter_0]
+
 # -----------------------------------------------------------------------------
 # Source RTL
 # -----------------------------------------------------------------------------
@@ -92,6 +107,7 @@ read_xdc $src_xdc
 
 # Bring the IP's synthesized checkpoint and wrapper into the design.
 read_ip [file join $ip_dir axi_uartlite_0 axi_uartlite_0.xci]
+read_ip [file join $ip_dir axi_protocol_converter_0 axi_protocol_converter_0.xci]
 
 set use_pipeline 0
 if {[info exists ::env(USE_PIPELINE_CORE)] && $::env(USE_PIPELINE_CORE) ne "" && $::env(USE_PIPELINE_CORE) ne "0"} {

@@ -2,10 +2,11 @@
 // axi_hello_top.sv
 // RealDigital Urbana (xc7s50csga324-1) Stage 5 AXI bringup top.
 //
-// Same core/MMCM/reset as hello_top, but the SoC's AXI-Lite master port is
-// wired out to a real AMD `axi_uartlite` IP instead of the sim BRAM. The
-// legacy MMIO console (0xD058_0000) is left in place but not pinned out —
-// software drives the TX line exclusively through the UartLite @ 0xC0000000.
+// soc_top exports an AXI4-full master (Stage 7a refactor — single-beat for
+// now). Vivado's free axi_protocol_converter IP downgrades it to AXI4-Lite
+// before feeding axi_uartlite_0. The legacy MMIO console (0xD058_0000) is
+// left in place but not pinned out — software drives the TX line through
+// UartLite @ 0xC000_0000.
 //
 // On-board serial bridge:
 //   uart_tx_pin → A16 = host RX (FPGA OUTPUT)
@@ -56,10 +57,6 @@ module axi_hello_top #(
     BUFG u_bufg_core (.I(mmcm_clkout0), .O(core_clk));
 
     // ---------- PSR-style reset sync ----------
-    // Async assert when BTN0 pressed or MMCM unlocked; async deassert would be
-    // unsafe, so we use a 2-FF synchronizer that releases in-domain.
-    // AMD `proc_sys_reset` does essentially the same thing; keeping this
-    // hand-built keeps the project self-contained (no extra IP for the reset).
     wire rst_async = !rst_n || !mmcm_locked;
 
     (* ASYNC_REG = "TRUE" *) reg rst_meta = 1'b1;
@@ -74,26 +71,44 @@ module axi_hello_top #(
             rst_sync <= rst_meta;
         end
     end
-    wire rstn_sync = !rst_sync;   // UartLite IP expects active-low resetn
+    wire rstn_sync = !rst_sync;   // IP cores expect active-low resetn
 
-    // ---------- AXI-Lite master (from soc_top) ----------
-    wire        m_axil_awvalid, m_axil_awready;
-    wire [31:0] m_axil_awaddr;
-    wire [2:0]  m_axil_awprot;
-    wire        m_axil_wvalid,  m_axil_wready;
-    wire [31:0] m_axil_wdata;
-    wire [3:0]  m_axil_wstrb;
-    wire        m_axil_bvalid,  m_axil_bready;
-    wire [1:0]  m_axil_bresp;
-    wire        m_axil_arvalid, m_axil_arready;
-    wire [31:0] m_axil_araddr;
-    wire [2:0]  m_axil_arprot;
-    wire        m_axil_rvalid,  m_axil_rready;
-    wire [31:0] m_axil_rdata;
-    wire [1:0]  m_axil_rresp;
+    // ---------- AXI4-full master (from soc_top) ----------
+    wire        m_axi_awvalid, m_axi_awready;
+    wire [31:0] m_axi_awaddr;
+    wire [3:0]  m_axi_awid;
+    wire [7:0]  m_axi_awlen;
+    wire [2:0]  m_axi_awsize;
+    wire [1:0]  m_axi_awburst;
+    wire        m_axi_awlock;
+    wire [3:0]  m_axi_awcache;
+    wire [2:0]  m_axi_awprot;
+    wire [3:0]  m_axi_awqos;
+    wire        m_axi_wvalid, m_axi_wready;
+    wire [31:0] m_axi_wdata;
+    wire [3:0]  m_axi_wstrb;
+    wire        m_axi_wlast;
+    wire        m_axi_bvalid, m_axi_bready;
+    wire [3:0]  m_axi_bid;
+    wire [1:0]  m_axi_bresp;
+    wire        m_axi_arvalid, m_axi_arready;
+    wire [31:0] m_axi_araddr;
+    wire [3:0]  m_axi_arid;
+    wire [7:0]  m_axi_arlen;
+    wire [2:0]  m_axi_arsize;
+    wire [1:0]  m_axi_arburst;
+    wire        m_axi_arlock;
+    wire [3:0]  m_axi_arcache;
+    wire [2:0]  m_axi_arprot;
+    wire [3:0]  m_axi_arqos;
+    wire        m_axi_rvalid, m_axi_rready;
+    wire [3:0]  m_axi_rid;
+    wire [31:0] m_axi_rdata;
+    wire [1:0]  m_axi_rresp;
+    wire        m_axi_rlast;
 
     // ---------- SoC ----------
-    wire        console_valid;   // legacy MMIO console byte (unused on pin — left for debug/ILA)
+    wire        console_valid;   // legacy MMIO console byte (debug/ILA)
     wire [7:0]  console_byte;
     wire        console_ready = 1'b1;
     wire        exit_valid;
@@ -115,16 +130,26 @@ module axi_hello_top #(
         .console_ready(console_ready),
         .exit_valid(exit_valid), .exit_code(exit_code),
 
-        .m_axil_awvalid(m_axil_awvalid), .m_axil_awready(m_axil_awready),
-        .m_axil_awaddr(m_axil_awaddr),   .m_axil_awprot(m_axil_awprot),
-        .m_axil_wvalid(m_axil_wvalid),   .m_axil_wready(m_axil_wready),
-        .m_axil_wdata(m_axil_wdata),     .m_axil_wstrb(m_axil_wstrb),
-        .m_axil_bvalid(m_axil_bvalid),   .m_axil_bready(m_axil_bready),
-        .m_axil_bresp(m_axil_bresp),
-        .m_axil_arvalid(m_axil_arvalid), .m_axil_arready(m_axil_arready),
-        .m_axil_araddr(m_axil_araddr),   .m_axil_arprot(m_axil_arprot),
-        .m_axil_rvalid(m_axil_rvalid),   .m_axil_rready(m_axil_rready),
-        .m_axil_rdata(m_axil_rdata),     .m_axil_rresp(m_axil_rresp),
+        .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
+        .m_axi_awaddr(m_axi_awaddr),   .m_axi_awid(m_axi_awid),
+        .m_axi_awlen(m_axi_awlen),     .m_axi_awsize(m_axi_awsize),
+        .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
+        .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot),
+        .m_axi_awqos(m_axi_awqos),
+        .m_axi_wvalid(m_axi_wvalid),   .m_axi_wready(m_axi_wready),
+        .m_axi_wdata(m_axi_wdata),     .m_axi_wstrb(m_axi_wstrb),
+        .m_axi_wlast(m_axi_wlast),
+        .m_axi_bvalid(m_axi_bvalid),   .m_axi_bready(m_axi_bready),
+        .m_axi_bid(m_axi_bid),         .m_axi_bresp(m_axi_bresp),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_araddr(m_axi_araddr),   .m_axi_arid(m_axi_arid),
+        .m_axi_arlen(m_axi_arlen),     .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst), .m_axi_arlock(m_axi_arlock),
+        .m_axi_arcache(m_axi_arcache), .m_axi_arprot(m_axi_arprot),
+        .m_axi_arqos(m_axi_arqos),
+        .m_axi_rvalid(m_axi_rvalid),   .m_axi_rready(m_axi_rready),
+        .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
+        .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast),
 
         .ext_mei(1'b0),
 
@@ -134,36 +159,121 @@ module axi_hello_top #(
         .commit_trap(commit_trap), .commit_cause(commit_cause)
     );
 
+    // ---------- AXI4 → AXI4-Lite protocol converter ----------
+    // Vivado free IP. SI = AXI4 (full), MI = AXI4-Lite. Connects soc_top's
+    // master to axi_uartlite_0 (Lite-only slave).
+    wire        ul_awvalid, ul_awready;
+    wire [31:0] ul_awaddr;
+    wire [2:0]  ul_awprot;
+    wire        ul_wvalid,  ul_wready;
+    wire [31:0] ul_wdata;
+    wire [3:0]  ul_wstrb;
+    wire        ul_bvalid,  ul_bready;
+    wire [1:0]  ul_bresp;
+    wire        ul_arvalid, ul_arready;
+    wire [31:0] ul_araddr;
+    wire [2:0]  ul_arprot;
+    wire        ul_rvalid,  ul_rready;
+    wire [31:0] ul_rdata;
+    wire [1:0]  ul_rresp;
+
+    axi_protocol_converter_0 u_proto_conv (
+        .aclk    (core_clk),
+        .aresetn (rstn_sync),
+
+        // Slave (AXI4-full) — from soc_top
+        .s_axi_awid    (m_axi_awid),
+        .s_axi_awaddr  (m_axi_awaddr),
+        .s_axi_awlen   (m_axi_awlen),
+        .s_axi_awsize  (m_axi_awsize),
+        .s_axi_awburst (m_axi_awburst),
+        .s_axi_awlock  (m_axi_awlock),
+        .s_axi_awcache (m_axi_awcache),
+        .s_axi_awprot  (m_axi_awprot),
+        .s_axi_awqos   (m_axi_awqos),
+        .s_axi_awvalid (m_axi_awvalid),
+        .s_axi_awready (m_axi_awready),
+
+        .s_axi_wdata   (m_axi_wdata),
+        .s_axi_wstrb   (m_axi_wstrb),
+        .s_axi_wlast   (m_axi_wlast),
+        .s_axi_wvalid  (m_axi_wvalid),
+        .s_axi_wready  (m_axi_wready),
+
+        .s_axi_bid     (m_axi_bid),
+        .s_axi_bresp   (m_axi_bresp),
+        .s_axi_bvalid  (m_axi_bvalid),
+        .s_axi_bready  (m_axi_bready),
+
+        .s_axi_arid    (m_axi_arid),
+        .s_axi_araddr  (m_axi_araddr),
+        .s_axi_arlen   (m_axi_arlen),
+        .s_axi_arsize  (m_axi_arsize),
+        .s_axi_arburst (m_axi_arburst),
+        .s_axi_arlock  (m_axi_arlock),
+        .s_axi_arcache (m_axi_arcache),
+        .s_axi_arprot  (m_axi_arprot),
+        .s_axi_arqos   (m_axi_arqos),
+        .s_axi_arvalid (m_axi_arvalid),
+        .s_axi_arready (m_axi_arready),
+
+        .s_axi_rid     (m_axi_rid),
+        .s_axi_rdata   (m_axi_rdata),
+        .s_axi_rresp   (m_axi_rresp),
+        .s_axi_rlast   (m_axi_rlast),
+        .s_axi_rvalid  (m_axi_rvalid),
+        .s_axi_rready  (m_axi_rready),
+
+        // Master (AXI4-Lite) — to axi_uartlite_0
+        .m_axi_awaddr  (ul_awaddr),
+        .m_axi_awprot  (ul_awprot),
+        .m_axi_awvalid (ul_awvalid),
+        .m_axi_awready (ul_awready),
+        .m_axi_wdata   (ul_wdata),
+        .m_axi_wstrb   (ul_wstrb),
+        .m_axi_wvalid  (ul_wvalid),
+        .m_axi_wready  (ul_wready),
+        .m_axi_bresp   (ul_bresp),
+        .m_axi_bvalid  (ul_bvalid),
+        .m_axi_bready  (ul_bready),
+        .m_axi_araddr  (ul_araddr),
+        .m_axi_arprot  (ul_arprot),
+        .m_axi_arvalid (ul_arvalid),
+        .m_axi_arready (ul_arready),
+        .m_axi_rdata   (ul_rdata),
+        .m_axi_rresp   (ul_rresp),
+        .m_axi_rvalid  (ul_rvalid),
+        .m_axi_rready  (ul_rready)
+    );
+
     // ---------- AMD AXI UartLite ----------
-    // Created from Vivado's IP catalog by the build TCL (module: axi_uartlite_0).
-    // Clock 50 MHz, baud 115200, 8N1, no parity, FIFOs on.
     wire uartlite_irq;
 
     axi_uartlite_0 u_uartlite (
         .s_axi_aclk   (core_clk),
         .s_axi_aresetn(rstn_sync),
 
-        .s_axi_awaddr (m_axil_awaddr[3:0]),
-        .s_axi_awvalid(m_axil_awvalid),
-        .s_axi_awready(m_axil_awready),
+        .s_axi_awaddr (ul_awaddr[3:0]),
+        .s_axi_awvalid(ul_awvalid),
+        .s_axi_awready(ul_awready),
 
-        .s_axi_wdata  (m_axil_wdata),
-        .s_axi_wstrb  (m_axil_wstrb),
-        .s_axi_wvalid (m_axil_wvalid),
-        .s_axi_wready (m_axil_wready),
+        .s_axi_wdata  (ul_wdata),
+        .s_axi_wstrb  (ul_wstrb),
+        .s_axi_wvalid (ul_wvalid),
+        .s_axi_wready (ul_wready),
 
-        .s_axi_bresp  (m_axil_bresp),
-        .s_axi_bvalid (m_axil_bvalid),
-        .s_axi_bready (m_axil_bready),
+        .s_axi_bresp  (ul_bresp),
+        .s_axi_bvalid (ul_bvalid),
+        .s_axi_bready (ul_bready),
 
-        .s_axi_araddr (m_axil_araddr[3:0]),
-        .s_axi_arvalid(m_axil_arvalid),
-        .s_axi_arready(m_axil_arready),
+        .s_axi_araddr (ul_araddr[3:0]),
+        .s_axi_arvalid(ul_arvalid),
+        .s_axi_arready(ul_arready),
 
-        .s_axi_rdata  (m_axil_rdata),
-        .s_axi_rresp  (m_axil_rresp),
-        .s_axi_rvalid (m_axil_rvalid),
-        .s_axi_rready (m_axil_rready),
+        .s_axi_rdata  (ul_rdata),
+        .s_axi_rresp  (ul_rresp),
+        .s_axi_rvalid (ul_rvalid),
+        .s_axi_rready (ul_rready),
 
         .rx           (uart_rx_pin),
         .tx           (uart_tx_pin),

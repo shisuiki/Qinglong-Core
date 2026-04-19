@@ -26,11 +26,12 @@ RTL_FILES := \
     $(RTL_DIR)/mem/sram_dp.sv \
     $(RTL_DIR)/mem/axil_bram_slave.sv \
     $(RTL_DIR)/mem/axil_uartlite_sim.sv \
+    $(RTL_DIR)/mem/axi4_router_1x2.sv \
     $(RTL_DIR)/cache/icache.sv \
     $(RTL_DIR)/cache/dcache.sv \
     $(RTL_DIR)/soc/mmio.sv \
     $(RTL_DIR)/soc/clint.sv \
-    $(RTL_DIR)/soc/axi_lite_master.sv \
+    $(RTL_DIR)/soc/axi4_master.sv \
     $(RTL_DIR)/soc/soc_top.sv \
     $(RTL_DIR)/soc/soc_tb_top.sv
 

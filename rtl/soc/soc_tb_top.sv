@@ -1,12 +1,15 @@
 // Thin Verilator testbench wrapper: pins out only the signals the C++ harness
-// needs to observe directly.  (Verilator treats this as the `top` module.)
+// needs to observe directly. (Verilator treats this as the `top` module.)
 //
-// Owns the sim peripheral fabric hanging off soc_top's AXI4-Lite master port.
-// Two slaves, steered by m_axil_*addr[12]:
-//   addr[12]=0  →  axil_uartlite_sim   @ 0xC000_0000 .. 0xC000_0FFF
-//                 (behavioural AMD UartLite model; TX → stdout)
-//   addr[12]=1  →  axil_bram_slave     @ 0xC000_1000 .. 0xC000_1FFF
-//                 (plain BRAM used by the asm-level axi_bram smoke test)
+// Owns the sim peripheral fabric hanging off soc_top's AXI4-full master port.
+// The bus type was promoted from AXI4-Lite to AXI4-full at Stage 7a so the
+// shape matches what MIG7 / Vivado axi_crossbar / a future cached burst master
+// expect — even though the protocol traffic is still single-beat right now.
+//
+// Topology:
+//   soc_top.m_axi_*  →  axi4_router_1x2  →  s0: axil_uartlite_sim @ 0xC000_0000
+//                                            s1: axil_bram_slave   @ 0xC000_1000
+//   Anything outside slaves 0/1 returns DECERR via the router's internal stub.
 
 module soc_tb_top (
     input  logic        clk,
@@ -27,21 +30,39 @@ module soc_tb_top (
     output logic [31:0] commit_cause
 );
 
-    // ---------- master (out of soc_top) ----------
-    logic        m_axil_awvalid, m_axil_awready;
-    logic [31:0] m_axil_awaddr;
-    logic [2:0]  m_axil_awprot;
-    logic        m_axil_wvalid, m_axil_wready;
-    logic [31:0] m_axil_wdata;
-    logic [3:0]  m_axil_wstrb;
-    logic        m_axil_bvalid, m_axil_bready;
-    logic [1:0]  m_axil_bresp;
-    logic        m_axil_arvalid, m_axil_arready;
-    logic [31:0] m_axil_araddr;
-    logic [2:0]  m_axil_arprot;
-    logic        m_axil_rvalid, m_axil_rready;
-    logic [31:0] m_axil_rdata;
-    logic [1:0]  m_axil_rresp;
+    // ---------- AXI4 master out of soc_top ----------
+    logic        m_axi_awvalid, m_axi_awready;
+    logic [31:0] m_axi_awaddr;
+    logic [3:0]  m_axi_awid;
+    logic [7:0]  m_axi_awlen;
+    logic [2:0]  m_axi_awsize;
+    logic [1:0]  m_axi_awburst;
+    logic        m_axi_awlock;
+    logic [3:0]  m_axi_awcache;
+    logic [2:0]  m_axi_awprot;
+    logic [3:0]  m_axi_awqos;
+    logic        m_axi_wvalid, m_axi_wready;
+    logic [31:0] m_axi_wdata;
+    logic [3:0]  m_axi_wstrb;
+    logic        m_axi_wlast;
+    logic        m_axi_bvalid, m_axi_bready;
+    logic [3:0]  m_axi_bid;
+    logic [1:0]  m_axi_bresp;
+    logic        m_axi_arvalid, m_axi_arready;
+    logic [31:0] m_axi_araddr;
+    logic [3:0]  m_axi_arid;
+    logic [7:0]  m_axi_arlen;
+    logic [2:0]  m_axi_arsize;
+    logic [1:0]  m_axi_arburst;
+    logic        m_axi_arlock;
+    logic [3:0]  m_axi_arcache;
+    logic [2:0]  m_axi_arprot;
+    logic [3:0]  m_axi_arqos;
+    logic        m_axi_rvalid, m_axi_rready;
+    logic [3:0]  m_axi_rid;
+    logic [31:0] m_axi_rdata;
+    logic [1:0]  m_axi_rresp;
+    logic        m_axi_rlast;
 
     soc_top u_soc (
         .clk(clk), .rst(rst),
@@ -49,16 +70,26 @@ module soc_tb_top (
         .console_ready(1'b1),
         .exit_valid(exit_valid), .exit_code(exit_code),
 
-        .m_axil_awvalid(m_axil_awvalid), .m_axil_awready(m_axil_awready),
-        .m_axil_awaddr(m_axil_awaddr),   .m_axil_awprot(m_axil_awprot),
-        .m_axil_wvalid(m_axil_wvalid),   .m_axil_wready(m_axil_wready),
-        .m_axil_wdata(m_axil_wdata),     .m_axil_wstrb(m_axil_wstrb),
-        .m_axil_bvalid(m_axil_bvalid),   .m_axil_bready(m_axil_bready),
-        .m_axil_bresp(m_axil_bresp),
-        .m_axil_arvalid(m_axil_arvalid), .m_axil_arready(m_axil_arready),
-        .m_axil_araddr(m_axil_araddr),   .m_axil_arprot(m_axil_arprot),
-        .m_axil_rvalid(m_axil_rvalid),   .m_axil_rready(m_axil_rready),
-        .m_axil_rdata(m_axil_rdata),     .m_axil_rresp(m_axil_rresp),
+        .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
+        .m_axi_awaddr(m_axi_awaddr),   .m_axi_awid(m_axi_awid),
+        .m_axi_awlen(m_axi_awlen),     .m_axi_awsize(m_axi_awsize),
+        .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
+        .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot),
+        .m_axi_awqos(m_axi_awqos),
+        .m_axi_wvalid(m_axi_wvalid),   .m_axi_wready(m_axi_wready),
+        .m_axi_wdata(m_axi_wdata),     .m_axi_wstrb(m_axi_wstrb),
+        .m_axi_wlast(m_axi_wlast),
+        .m_axi_bvalid(m_axi_bvalid),   .m_axi_bready(m_axi_bready),
+        .m_axi_bid(m_axi_bid),         .m_axi_bresp(m_axi_bresp),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_araddr(m_axi_araddr),   .m_axi_arid(m_axi_arid),
+        .m_axi_arlen(m_axi_arlen),     .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst), .m_axi_arlock(m_axi_arlock),
+        .m_axi_arcache(m_axi_arcache), .m_axi_arprot(m_axi_arprot),
+        .m_axi_arqos(m_axi_arqos),
+        .m_axi_rvalid(m_axi_rvalid),   .m_axi_rready(m_axi_rready),
+        .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
+        .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast),
 
         .ext_mei(1'b0),
 
@@ -67,109 +98,96 @@ module soc_tb_top (
         .commit_trap(commit_trap), .commit_cause(commit_cause)
     );
 
-    // ---------- tiny 1→2 AXI-Lite decoder ----------
-    // Slave select is remembered per outstanding transaction (one in flight
-    // at a time, enforced by the master shim), so responses route back to
-    // the right slave even when the master's addr has already changed.
+    // ---------- AXI4 router → 2× AXI-Lite slaves ----------
+    logic        s0_aw_v, s0_aw_r, s0_w_v, s0_w_r, s0_b_v, s0_b_r;
+    logic [31:0] s0_aw_a, s0_w_d, s0_ar_a, s0_r_d;
+    logic [2:0]  s0_aw_p, s0_ar_p;
+    logic [3:0]  s0_w_s;
+    logic [1:0]  s0_b_resp, s0_r_resp;
+    logic        s0_ar_v, s0_ar_r, s0_r_v, s0_r_r;
 
-    logic sel_w_q, sel_w_valid_q;
-    logic sel_r_q, sel_r_valid_q;
+    logic        s1_aw_v, s1_aw_r, s1_w_v, s1_w_r, s1_b_v, s1_b_r;
+    logic [31:0] s1_aw_a, s1_w_d, s1_ar_a, s1_r_d;
+    logic [2:0]  s1_aw_p, s1_ar_p;
+    logic [3:0]  s1_w_s;
+    logic [1:0]  s1_b_resp, s1_r_resp;
+    logic        s1_ar_v, s1_ar_r, s1_r_v, s1_r_r;
 
-    // Combinational select for the *current* AW/AR — valid when we're in
-    // the handshake phase for that channel.
-    wire sel_w_next = m_axil_awaddr[12];
-    wire sel_r_next = m_axil_araddr[12];
+    axi4_router_1x2 #(.ID_W(4)) u_xbar (
+        .clk(clk), .rst(rst),
 
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            sel_w_q       <= 1'b0;
-            sel_w_valid_q <= 1'b0;
-            sel_r_q       <= 1'b0;
-            sel_r_valid_q <= 1'b0;
-        end else begin
-            if (m_axil_awvalid && m_axil_awready) begin
-                sel_w_q       <= sel_w_next;
-                sel_w_valid_q <= 1'b1;
-            end else if (m_axil_bvalid && m_axil_bready) begin
-                sel_w_valid_q <= 1'b0;
-            end
-            if (m_axil_arvalid && m_axil_arready) begin
-                sel_r_q       <= sel_r_next;
-                sel_r_valid_q <= 1'b1;
-            end else if (m_axil_rvalid && m_axil_rready) begin
-                sel_r_valid_q <= 1'b0;
-            end
-        end
-    end
+        .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
+        .m_axi_awaddr(m_axi_awaddr),   .m_axi_awid(m_axi_awid),
+        .m_axi_awlen(m_axi_awlen),     .m_axi_awsize(m_axi_awsize),
+        .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
+        .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot),
+        .m_axi_awqos(m_axi_awqos),
+        .m_axi_wvalid(m_axi_wvalid),   .m_axi_wready(m_axi_wready),
+        .m_axi_wdata(m_axi_wdata),     .m_axi_wstrb(m_axi_wstrb),
+        .m_axi_wlast(m_axi_wlast),
+        .m_axi_bvalid(m_axi_bvalid),   .m_axi_bready(m_axi_bready),
+        .m_axi_bid(m_axi_bid),         .m_axi_bresp(m_axi_bresp),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_araddr(m_axi_araddr),   .m_axi_arid(m_axi_arid),
+        .m_axi_arlen(m_axi_arlen),     .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst), .m_axi_arlock(m_axi_arlock),
+        .m_axi_arcache(m_axi_arcache), .m_axi_arprot(m_axi_arprot),
+        .m_axi_arqos(m_axi_arqos),
+        .m_axi_rvalid(m_axi_rvalid),   .m_axi_rready(m_axi_rready),
+        .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
+        .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast),
 
-    // Per-slave signals
-    logic [1:0]        s_awvalid, s_awready;
-    logic [1:0]        s_wvalid,  s_wready;
-    logic [1:0]        s_bvalid;
-    logic [1:0][1:0]   s_bresp;
-    logic [1:0]        s_arvalid, s_arready;
-    logic [1:0]        s_rvalid;
-    logic [1:0][31:0]  s_rdata;
-    logic [1:0][1:0]   s_rresp;
+        .s0_axil_awvalid(s0_aw_v), .s0_axil_awready(s0_aw_r),
+        .s0_axil_awaddr(s0_aw_a),  .s0_axil_awprot(s0_aw_p),
+        .s0_axil_wvalid(s0_w_v),   .s0_axil_wready(s0_w_r),
+        .s0_axil_wdata(s0_w_d),    .s0_axil_wstrb(s0_w_s),
+        .s0_axil_bvalid(s0_b_v),   .s0_axil_bready(s0_b_r),
+        .s0_axil_bresp(s0_b_resp),
+        .s0_axil_arvalid(s0_ar_v), .s0_axil_arready(s0_ar_r),
+        .s0_axil_araddr(s0_ar_a),  .s0_axil_arprot(s0_ar_p),
+        .s0_axil_rvalid(s0_r_v),   .s0_axil_rready(s0_r_r),
+        .s0_axil_rdata(s0_r_d),    .s0_axil_rresp(s0_r_resp),
 
-    // AW / W fan-out: only the selected slave sees valid; unselected sees 0
-    assign s_awvalid[0] = m_axil_awvalid && (sel_w_next == 1'b0);
-    assign s_awvalid[1] = m_axil_awvalid && (sel_w_next == 1'b1);
-    assign m_axil_awready = (sel_w_next == 1'b0) ? s_awready[0] : s_awready[1];
-
-    // W follows the AW select captured *at AW accept* (one-in-flight so this is
-    // the same as the current sel_w_next until AW handshakes, and then sel_w_q).
-    wire sel_w_eff = sel_w_valid_q ? sel_w_q : sel_w_next;
-    assign s_wvalid[0] = m_axil_wvalid && (sel_w_eff == 1'b0);
-    assign s_wvalid[1] = m_axil_wvalid && (sel_w_eff == 1'b1);
-    assign m_axil_wready = (sel_w_eff == 1'b0) ? s_wready[0] : s_wready[1];
-
-    // B response comes back from captured slave
-    assign m_axil_bvalid = sel_w_valid_q ? s_bvalid[sel_w_q] : 1'b0;
-    assign m_axil_bresp  = sel_w_valid_q ? s_bresp[sel_w_q]  : 2'b00;
-    assign s_bready_0 = sel_w_valid_q && (sel_w_q == 1'b0) && m_axil_bready;
-    assign s_bready_1 = sel_w_valid_q && (sel_w_q == 1'b1) && m_axil_bready;
-    wire s_bready_0, s_bready_1;
-
-    // AR fan-out / R funnel
-    assign s_arvalid[0] = m_axil_arvalid && (sel_r_next == 1'b0);
-    assign s_arvalid[1] = m_axil_arvalid && (sel_r_next == 1'b1);
-    assign m_axil_arready = (sel_r_next == 1'b0) ? s_arready[0] : s_arready[1];
-
-    assign m_axil_rvalid = sel_r_valid_q ? s_rvalid[sel_r_q] : 1'b0;
-    assign m_axil_rdata  = sel_r_valid_q ? s_rdata[sel_r_q]  : 32'd0;
-    assign m_axil_rresp  = sel_r_valid_q ? s_rresp[sel_r_q]  : 2'b00;
-    wire s_rready_0 = sel_r_valid_q && (sel_r_q == 1'b0) && m_axil_rready;
-    wire s_rready_1 = sel_r_valid_q && (sel_r_q == 1'b1) && m_axil_rready;
+        .s1_axil_awvalid(s1_aw_v), .s1_axil_awready(s1_aw_r),
+        .s1_axil_awaddr(s1_aw_a),  .s1_axil_awprot(s1_aw_p),
+        .s1_axil_wvalid(s1_w_v),   .s1_axil_wready(s1_w_r),
+        .s1_axil_wdata(s1_w_d),    .s1_axil_wstrb(s1_w_s),
+        .s1_axil_bvalid(s1_b_v),   .s1_axil_bready(s1_b_r),
+        .s1_axil_bresp(s1_b_resp),
+        .s1_axil_arvalid(s1_ar_v), .s1_axil_arready(s1_ar_r),
+        .s1_axil_araddr(s1_ar_a),  .s1_axil_arprot(s1_ar_p),
+        .s1_axil_rvalid(s1_r_v),   .s1_axil_rready(s1_r_r),
+        .s1_axil_rdata(s1_r_d),    .s1_axil_rresp(s1_r_resp)
+    );
 
     // ---------- slave 0: UartLite stub @ 0xC000_0000 ----------
     axil_uartlite_sim u_ul (
         .clk(clk), .rst(rst),
-        .s_axil_awvalid(s_awvalid[0]), .s_axil_awready(s_awready[0]),
-        .s_axil_awaddr(m_axil_awaddr),  .s_axil_awprot(m_axil_awprot),
-        .s_axil_wvalid(s_wvalid[0]),    .s_axil_wready(s_wready[0]),
-        .s_axil_wdata(m_axil_wdata),    .s_axil_wstrb(m_axil_wstrb),
-        .s_axil_bvalid(s_bvalid[0]),    .s_axil_bready(s_bready_0),
-        .s_axil_bresp(s_bresp[0]),
-        .s_axil_arvalid(s_arvalid[0]),  .s_axil_arready(s_arready[0]),
-        .s_axil_araddr(m_axil_araddr),  .s_axil_arprot(m_axil_arprot),
-        .s_axil_rvalid(s_rvalid[0]),    .s_axil_rready(s_rready_0),
-        .s_axil_rdata(s_rdata[0]),      .s_axil_rresp(s_rresp[0])
+        .s_axil_awvalid(s0_aw_v),  .s_axil_awready(s0_aw_r),
+        .s_axil_awaddr(s0_aw_a),   .s_axil_awprot(s0_aw_p),
+        .s_axil_wvalid(s0_w_v),    .s_axil_wready(s0_w_r),
+        .s_axil_wdata(s0_w_d),     .s_axil_wstrb(s0_w_s),
+        .s_axil_bvalid(s0_b_v),    .s_axil_bready(s0_b_r),
+        .s_axil_bresp(s0_b_resp),
+        .s_axil_arvalid(s0_ar_v),  .s_axil_arready(s0_ar_r),
+        .s_axil_araddr(s0_ar_a),   .s_axil_arprot(s0_ar_p),
+        .s_axil_rvalid(s0_r_v),    .s_axil_rready(s0_r_r),
+        .s_axil_rdata(s0_r_d),     .s_axil_rresp(s0_r_resp)
     );
 
     // ---------- slave 1: BRAM @ 0xC000_1000 ----------
     axil_bram_slave #(.WORDS(1024)) u_axi_bram (
         .clk(clk), .rst(rst),
-        .s_axil_awvalid(s_awvalid[1]), .s_axil_awready(s_awready[1]),
-        .s_axil_awaddr(m_axil_awaddr),  .s_axil_awprot(m_axil_awprot),
-        .s_axil_wvalid(s_wvalid[1]),    .s_axil_wready(s_wready[1]),
-        .s_axil_wdata(m_axil_wdata),    .s_axil_wstrb(m_axil_wstrb),
-        .s_axil_bvalid(s_bvalid[1]),    .s_axil_bready(s_bready_1),
-        .s_axil_bresp(s_bresp[1]),
-        .s_axil_arvalid(s_arvalid[1]),  .s_axil_arready(s_arready[1]),
-        .s_axil_araddr(m_axil_araddr),  .s_axil_arprot(m_axil_arprot),
-        .s_axil_rvalid(s_rvalid[1]),    .s_axil_rready(s_rready_1),
-        .s_axil_rdata(s_rdata[1]),      .s_axil_rresp(s_rresp[1])
+        .s_axil_awvalid(s1_aw_v),  .s_axil_awready(s1_aw_r),
+        .s_axil_awaddr(s1_aw_a),   .s_axil_awprot(s1_aw_p),
+        .s_axil_wvalid(s1_w_v),    .s_axil_wready(s1_w_r),
+        .s_axil_wdata(s1_w_d),     .s_axil_wstrb(s1_w_s),
+        .s_axil_bvalid(s1_b_v),    .s_axil_bready(s1_b_r),
+        .s_axil_bresp(s1_b_resp),
+        .s_axil_arvalid(s1_ar_v),  .s_axil_arready(s1_ar_r),
+        .s_axil_araddr(s1_ar_a),   .s_axil_arprot(s1_ar_p),
+        .s_axil_rvalid(s1_r_v),    .s_axil_rready(s1_r_r),
+        .s_axil_rdata(s1_r_d),     .s_axil_rresp(s1_r_resp)
     );
 
 endmodule

@@ -25,28 +25,51 @@ module soc_top #(
     output logic        exit_valid,
     output logic [31:0] exit_code,
 
-    // AXI4-Lite master port — peripheral crossbar lives outside the SoC core.
-    // In sim this is tied to axil_bram_slave inside soc_tb_top; on FPGA it
-    // fans out to UartLite / Timer / Intc through a Xilinx AXI crossbar.
-    output logic        m_axil_awvalid,
-    input  logic        m_axil_awready,
-    output logic [31:0] m_axil_awaddr,
-    output logic [2:0]  m_axil_awprot,
-    output logic        m_axil_wvalid,
-    input  logic        m_axil_wready,
-    output logic [31:0] m_axil_wdata,
-    output logic [3:0]  m_axil_wstrb,
-    input  logic        m_axil_bvalid,
-    output logic        m_axil_bready,
-    input  logic [1:0]  m_axil_bresp,
-    output logic        m_axil_arvalid,
-    input  logic        m_axil_arready,
-    output logic [31:0] m_axil_araddr,
-    output logic [2:0]  m_axil_arprot,
-    input  logic        m_axil_rvalid,
-    output logic        m_axil_rready,
-    input  logic [31:0] m_axil_rdata,
-    input  logic [1:0]  m_axil_rresp,
+    // AXI4-full master port — peripheral crossbar lives outside the SoC core.
+    // In sim this fans into axi4_router_1x2 + behavioural Lite slaves; on FPGA
+    // this connects to a Vivado axi_crossbar IP, which then talks to MIG /
+    // axi_uartlite / PLIC / etc. via the standard protocol converters.
+    //
+    // The shim is single-beat / single-outstanding today (Stage 7a). When
+    // 7c brings up the cached burst master we extend axi4_master to issue
+    // bursts; the bus type stays the same.
+    output logic        m_axi_awvalid,
+    input  logic        m_axi_awready,
+    output logic [31:0] m_axi_awaddr,
+    output logic [3:0]  m_axi_awid,
+    output logic [7:0]  m_axi_awlen,
+    output logic [2:0]  m_axi_awsize,
+    output logic [1:0]  m_axi_awburst,
+    output logic        m_axi_awlock,
+    output logic [3:0]  m_axi_awcache,
+    output logic [2:0]  m_axi_awprot,
+    output logic [3:0]  m_axi_awqos,
+    output logic        m_axi_wvalid,
+    input  logic        m_axi_wready,
+    output logic [31:0] m_axi_wdata,
+    output logic [3:0]  m_axi_wstrb,
+    output logic        m_axi_wlast,
+    input  logic        m_axi_bvalid,
+    output logic        m_axi_bready,
+    input  logic [3:0]  m_axi_bid,
+    input  logic [1:0]  m_axi_bresp,
+    output logic        m_axi_arvalid,
+    input  logic        m_axi_arready,
+    output logic [31:0] m_axi_araddr,
+    output logic [3:0]  m_axi_arid,
+    output logic [7:0]  m_axi_arlen,
+    output logic [2:0]  m_axi_arsize,
+    output logic [1:0]  m_axi_arburst,
+    output logic        m_axi_arlock,
+    output logic [3:0]  m_axi_arcache,
+    output logic [2:0]  m_axi_arprot,
+    output logic [3:0]  m_axi_arqos,
+    input  logic        m_axi_rvalid,
+    output logic        m_axi_rready,
+    input  logic [3:0]  m_axi_rid,
+    input  logic [31:0] m_axi_rdata,
+    input  logic [1:0]  m_axi_rresp,
+    input  logic        m_axi_rlast,
 
     // External MEI — from an off-chip AXI Intc on FPGA, tied 0 in sim.
     input  logic        ext_mei,
@@ -480,26 +503,36 @@ module soc_top #(
         .mti(clint_mti), .msi(clint_msi)
     );
 
-    // ---------- AXI4-Lite master shim ----------
-    // Master-side signals are ports of this module (wired to sim slave or real
-    // peripheral crossbar above us).
-    axi_lite_master u_axi_master (
+    // ---------- AXI4-full master shim ----------
+    // Master-side signals are ports of this module (wired to the sim router or
+    // a real Vivado axi_crossbar above us).
+    axi4_master #(.ID_W(4)) u_axi_master (
         .clk(clk), .rst(rst),
         .req_valid(axi_req_valid), .req_addr(axi_req_addr), .req_wen(axi_req_wen),
         .req_wdata(axi_req_wdata), .req_wmask(axi_req_wmask),
         .req_ready(axi_req_ready),
         .rsp_valid(axi_rsp_valid), .rsp_rdata(axi_rsp_rdata), .rsp_fault(axi_rsp_fault),
 
-        .m_axil_awvalid(m_axil_awvalid), .m_axil_awready(m_axil_awready),
-        .m_axil_awaddr(m_axil_awaddr),   .m_axil_awprot(m_axil_awprot),
-        .m_axil_wvalid(m_axil_wvalid),   .m_axil_wready(m_axil_wready),
-        .m_axil_wdata(m_axil_wdata),     .m_axil_wstrb(m_axil_wstrb),
-        .m_axil_bvalid(m_axil_bvalid),   .m_axil_bready(m_axil_bready),
-        .m_axil_bresp(m_axil_bresp),
-        .m_axil_arvalid(m_axil_arvalid), .m_axil_arready(m_axil_arready),
-        .m_axil_araddr(m_axil_araddr),   .m_axil_arprot(m_axil_arprot),
-        .m_axil_rvalid(m_axil_rvalid),   .m_axil_rready(m_axil_rready),
-        .m_axil_rdata(m_axil_rdata),     .m_axil_rresp(m_axil_rresp)
+        .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
+        .m_axi_awaddr(m_axi_awaddr),   .m_axi_awid(m_axi_awid),
+        .m_axi_awlen(m_axi_awlen),     .m_axi_awsize(m_axi_awsize),
+        .m_axi_awburst(m_axi_awburst), .m_axi_awlock(m_axi_awlock),
+        .m_axi_awcache(m_axi_awcache), .m_axi_awprot(m_axi_awprot),
+        .m_axi_awqos(m_axi_awqos),
+        .m_axi_wvalid(m_axi_wvalid),   .m_axi_wready(m_axi_wready),
+        .m_axi_wdata(m_axi_wdata),     .m_axi_wstrb(m_axi_wstrb),
+        .m_axi_wlast(m_axi_wlast),
+        .m_axi_bvalid(m_axi_bvalid),   .m_axi_bready(m_axi_bready),
+        .m_axi_bid(m_axi_bid),         .m_axi_bresp(m_axi_bresp),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_araddr(m_axi_araddr),   .m_axi_arid(m_axi_arid),
+        .m_axi_arlen(m_axi_arlen),     .m_axi_arsize(m_axi_arsize),
+        .m_axi_arburst(m_axi_arburst), .m_axi_arlock(m_axi_arlock),
+        .m_axi_arcache(m_axi_arcache), .m_axi_arprot(m_axi_arprot),
+        .m_axi_arqos(m_axi_arqos),
+        .m_axi_rvalid(m_axi_rvalid),   .m_axi_rready(m_axi_rready),
+        .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
+        .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast)
     );
 
 endmodule
