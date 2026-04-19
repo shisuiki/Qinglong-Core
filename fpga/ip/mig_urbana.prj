@@ -8,31 +8,33 @@
                 13 row × 10 col × 3 bank × 16-bit = 1Gbit (= 128 MB total).
                 The Urbana board routes addr[14:0] to the chip, but the 1Gbit
                 part only uses addr[12:0]; MIG drives only what it needs.
-    Data rate : 666 MT/s (memory clock = 333 MHz, ui_clk ≈ 83.3 MHz, PHY 4:1).
-                MIG7's `time_periods.csv` locks Spartan-7 -1 DDR3L Components
-                to a TimePeriod window of [3000, 3300] ps — anything outside
-                is rejected. 3000 ps (666 MT/s) is the fastest supported.
-                Clean PLL maths off 100 MHz input fall close enough that MIG
-                rounds the input to ~99 MHz; the ~1% offset is harmless.
-    Sys clock : 100 MHz differential on C1/B1 (sys_clk_p/n), via MIG's input
-                MMCM. Reference clock is generated internally from the system
-                clock — no separate 200 MHz pin needed.
+    Data rate : 666 MT/s (memory clock = 333.333 MHz, ui_clk ≈ 166.7 MHz,
+                PHY 2:1). The RealDigital DDRtest reference design uses the
+                same speed point with PHY 2:1; the original PHY 4:1 attempt
+                here failed to route (lane-D BUFIO unable to reach SERDES on
+                the Urbana pinout). 2:1 mode uses a per-lane phaser fed by a
+                pre-buffered 333 MHz clock and doesn't have that constraint.
+    Sys clock : External — the top RTL takes the 100 MHz C1/B1 differential
+                pair through an IBUFGDS + user MMCM that produces a 333.333
+                MHz `sys_clk_i` and a 200 MHz `clk_ref_i` (IDELAYCTRL ref).
+                MIG's <SystemClock>No Buffer plus <ReferenceClock>No Buffer
+                tells the IP that both clocks arrive already buffered.
     Pins      : verbatim from the RealDigital Urbana master XDC. SSTL135 for
                 single-ended, DIFF_SSTL135 for differential. HR banks → no DCI
                 variants and an internal VREF.
 -->
 <Project NoOfControllers="1" >
     <ModuleName>mig_ddr3_0</ModuleName>
-    <dci_inouts_inputs>0</dci_inouts_inputs>
-    <dci_inputs>0</dci_inputs>
+    <dci_inouts_inputs>1</dci_inouts_inputs>
+    <dci_inputs>1</dci_inputs>
     <Debug_En>OFF</Debug_En>
     <DataDepth_En>1024</DataDepth_En>
     <LowPower_En>ON</LowPower_En>
     <XADC_En>Disabled</XADC_En>
     <TargetFPGA>xc7s50-csga324/-1</TargetFPGA>
     <Version>4.2</Version>
-    <SystemClock>Differential</SystemClock>
-    <ReferenceClock>Use System Clock</ReferenceClock>
+    <SystemClock>No Buffer</SystemClock>
+    <ReferenceClock>No Buffer</ReferenceClock>
     <SysResetPolarity>ACTIVE LOW</SysResetPolarity>
     <BankSelectionFlag>FALSE</BankSelectionFlag>
     <InternalVref>1</InternalVref>
@@ -42,10 +44,10 @@
         <MemoryDevice>DDR3_SDRAM/Components/MT41K64M16XX-125</MemoryDevice>
         <TimePeriod>3000</TimePeriod>
         <VccAuxIO>1.8V</VccAuxIO>
-        <PHYRatio>4:1</PHYRatio>
-        <InputClkFreq>100</InputClkFreq>
+        <PHYRatio>2:1</PHYRatio>
+        <InputClkFreq>333.333</InputClkFreq>
         <UIExtraClocks>0</UIExtraClocks>
-        <MMCMClkOut0>10.000</MMCMClkOut0>
+        <MMCMClkOut0>1.000</MMCMClkOut0>
         <MMCMClkOut1>1</MMCMClkOut1>
         <MMCMClkOut2>1</MMCMClkOut2>
         <MMCMClkOut3>1</MMCMClkOut3>
@@ -109,11 +111,9 @@
             <Pin VCCAUX_IO="NORMAL" IOSTANDARD="SSTL135" PADName="U2"  SLEW="FAST" name="ddr3_ras_n"    IN_TERM="" />
             <Pin VCCAUX_IO="NORMAL" IOSTANDARD="LVCMOS15" PADName="M5" SLEW="FAST" name="ddr3_reset_n" IN_TERM="" />
             <Pin VCCAUX_IO="NORMAL" IOSTANDARD="SSTL135" PADName="T2"  SLEW="FAST" name="ddr3_we_n"     IN_TERM="" />
-            <Pin VCCAUX_IO="DONTCARE" IOSTANDARD="DIFF_SSTL135" PADName="C1" SLEW="" name="sys_clk_p" IN_TERM="" />
-            <Pin VCCAUX_IO="DONTCARE" IOSTANDARD="DIFF_SSTL135" PADName="B1" SLEW="" name="sys_clk_n" IN_TERM="" />
         </PinSelection>
         <System_Clock>
-            <Pin PADName="C1/B1(CC_P/N)" Bank="34" name="sys_clk_p/n" />
+            <Pin PADName="No connect" Bank="Select Bank" name="sys_clk_p/n" />
         </System_Clock>
         <System_Control>
             <Pin PADName="No connect" Bank="Select Bank" name="sys_rst" />
@@ -121,11 +121,11 @@
             <Pin PADName="No connect" Bank="Select Bank" name="tg_compare_error" />
         </System_Control>
         <TimingParameters>
-            <Parameters twtr="7.5" trrd="6" trefi="7.8" tfaw="40" trtp="7.5" tcke="5" trfc="260" trp="13.75" tras="35" trcd="13.75" />
+            <Parameters twtr="7.5" trrd="7.5" trefi="7.8" tfaw="40" trtp="7.5" tcke="5" trfc="110" trp="13.75" tras="35" trcd="13.75" />
         </TimingParameters>
         <mrBurstLength name="Burst Length" >8 - Fixed</mrBurstLength>
         <mrBurstType name="Read Burst Type and Length" >Sequential</mrBurstType>
-        <mrCasLatency name="CAS Latency" >6</mrCasLatency>
+        <mrCasLatency name="CAS Latency" >5</mrCasLatency>
         <mrMode name="Mode" >Normal</mrMode>
         <mrDllReset name="DLL Reset" >No</mrDllReset>
         <mrPdMode name="DLL control for precharge PD" >Slow Exit</mrPdMode>

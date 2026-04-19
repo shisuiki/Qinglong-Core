@@ -31,8 +31,10 @@ PROG_TCL   := ../scripts/prog_axi_hello.tcl
 
 VIVADO_BATCH_FLAGS := -mode batch
 
-# CORE=pipeline selects the 5-stage pipeline core; default is multicycle.
-CORE ?=
+# CORE selects the RISC-V core variant; axi_hello defaults to pipeline because
+# multicycle's EX stage (~36 ns) can't close at 50 MHz once DDR3/AXI fabric is
+# packed next to it. Override with CORE=multicycle if you want to try anyway.
+CORE ?= pipeline
 ifeq ($(CORE),pipeline)
 USE_PIPELINE_CORE := 1
 else

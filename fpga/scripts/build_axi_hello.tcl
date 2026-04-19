@@ -70,15 +70,12 @@ puts "==> build_axi_hello: mig_prj    = $mig_prj_file"
 set_part $part
 
 # -----------------------------------------------------------------------------
-# axi_uartlite — 115200 8N1 on s_axi_aclk = 50 MHz (= MIG ui_clk).
+# axi_uartlite — 115200 8N1 on soc_clk (50 MHz).
 # -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:axi_uartlite:2.0 -module_name axi_uartlite_0 -dir $ip_dir
-# UartLite hangs off MIG's ui_clk (≈83 MHz at 666 MT/s, 4:1 PHY ratio).
-# The baud divisor is computed once from this constant — slight rounding on
-# the actual ui_clk is harmless for 115200 8N1.
 set_property -dict [list \
     CONFIG.C_BAUDRATE           {115200} \
-    CONFIG.C_S_AXI_ACLK_FREQ_HZ {83333333} \
+    CONFIG.C_S_AXI_ACLK_FREQ_HZ {50000000} \
     CONFIG.C_DATA_BITS          {8} \
     CONFIG.C_USE_PARITY         {0} \
     CONFIG.C_ODD_PARITY         {0} \
@@ -128,6 +125,22 @@ generate_target {synthesis simulation} [get_ips axi_protocol_converter_0]
 synth_ip [get_ips axi_protocol_converter_0]
 
 # -----------------------------------------------------------------------------
+# axi_clock_converter — crosses xbar M00 (soc_clk, 50 MHz) → MIG s_axi
+# (ui_clk, ~166.7 MHz). AXI4-full, 32-bit data, 27-bit addr to match MIG, ID=0
+# because the crossbar drops IDs (NUM_SI=1).
+# -----------------------------------------------------------------------------
+create_ip -vlnv xilinx.com:ip:axi_clock_converter:2.1 -module_name axi_clock_converter_0 -dir $ip_dir
+set_property -dict [list \
+    CONFIG.PROTOCOL   {AXI4} \
+    CONFIG.DATA_WIDTH {32} \
+    CONFIG.ADDR_WIDTH {32} \
+    CONFIG.ID_WIDTH   {0} \
+    CONFIG.ACLK_ASYNC {1} \
+] [get_ips axi_clock_converter_0]
+generate_target {synthesis simulation} [get_ips axi_clock_converter_0]
+synth_ip [get_ips axi_clock_converter_0]
+
+# -----------------------------------------------------------------------------
 # MIG7 DDR3L controller — config in fpga/ip/mig_urbana.prj
 # -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:mig_7series:4.2 -module_name mig_ddr3_0 -dir $ip_dir
@@ -138,6 +151,25 @@ set_property -dict [list \
     CONFIG.BOARD_MIG_PARAM       {Custom} \
 ] [get_ips mig_ddr3_0]
 generate_target {synthesis simulation} [get_ips mig_ddr3_0]
+
+# MIG 4.2 spuriously marks bit 36 of PHY_0_BITLANES = 1 for the Urbana pinout,
+# treating ddr3_reset_n's IOB (M5 = IOB_X1Y37) as a DQ slot and emitting an
+# unplaceable ISERDES/OSERDES pair in byte_lane_D slot 0. Clear that bit in
+# the generated RTL before synth_ip so the SERDES are never instantiated.
+set mig_rtl [file join $ip_dir mig_ddr3_0 mig_ddr3_0 user_design rtl mig_ddr3_0_mig.v]
+if {[file exists $mig_rtl]} {
+    set fh [open $mig_rtl r]; set content [read $fh]; close $fh
+    set patched [regsub {PHY_0_BITLANES(\s+)=(\s+)48'h3FF_3FE_FFF_B7B} $content {PHY_0_BITLANES\1=\2 48'h3FE_3FE_FFF_B7B} content]
+    if {$patched > 0} {
+        set fh [open $mig_rtl w]; puts -nonewline $fh $content; close $fh
+        puts "==> build_axi_hello: patched PHY_0_BITLANES (cleared bit 36, Urbana ddr3_reset_n workaround)"
+    } else {
+        puts "==> build_axi_hello: WARNING — PHY_0_BITLANES pattern not matched in $mig_rtl"
+    }
+} else {
+    puts "==> build_axi_hello: WARNING — $mig_rtl missing; BITLANES patch skipped"
+}
+
 synth_ip [get_ips mig_ddr3_0]
 
 # -----------------------------------------------------------------------------
@@ -152,6 +184,7 @@ read_xdc $src_xdc
 read_ip [file join $ip_dir axi_uartlite_0           axi_uartlite_0.xci]
 read_ip [file join $ip_dir axi_crossbar_0           axi_crossbar_0.xci]
 read_ip [file join $ip_dir axi_protocol_converter_0 axi_protocol_converter_0.xci]
+read_ip [file join $ip_dir axi_clock_converter_0    axi_clock_converter_0.xci]
 read_ip [file join $ip_dir mig_ddr3_0               mig_ddr3_0.xci]
 
 set use_pipeline 0

@@ -21,7 +21,7 @@ set_part $part
 create_ip -vlnv xilinx.com:ip:axi_uartlite:2.0 -module_name axi_uartlite_0 -dir $ip_dir
 set_property -dict [list \
     CONFIG.C_BAUDRATE           {115200} \
-    CONFIG.C_S_AXI_ACLK_FREQ_HZ {83333333} \
+    CONFIG.C_S_AXI_ACLK_FREQ_HZ {166666667} \
     CONFIG.C_DATA_BITS          {8} \
     CONFIG.C_USE_PARITY         {0} \
     CONFIG.C_ODD_PARITY         {0} \

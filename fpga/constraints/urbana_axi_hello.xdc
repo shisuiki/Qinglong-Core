@@ -18,14 +18,13 @@ set_property -dict {PACKAGE_PIN N15 IOSTANDARD LVCMOS33} [get_ports clk]
 create_clock -period 10.000 -name alivesys [get_ports clk]
 
 # -----------------------------------------------------------------------------
-# 100 MHz differential oscillator on C1/B1. Pin LOC + IOSTANDARD + create_clock
-# are emitted by the MIG IP XDC (DIFF_SSTL135, 9.75 ns). We only add the
-# CLOCK_DEDICATED_ROUTE override below because on Urbana the DDR3 ref-clock
-# pin is not in the same clock region as the MIG PLL, so Vivado needs an
-# explicit okay to route it via the clock backbone.
+# 100 MHz differential oscillator on C1/B1. With MIG's <SystemClock>No Buffer
+# the IP no longer owns this pin pair — the user RTL takes it through its own
+# IBUFGDS + MMCM, so we declare the LOC, IOSTANDARD, and clock period here.
 # -----------------------------------------------------------------------------
-set_property CLOCK_DEDICATED_ROUTE BACKBONE \
-    [get_nets -hier -filter {NAME =~ *u_ddr3_clk_ibuf/sys_clk_ibufg*}]
+set_property -dict {PACKAGE_PIN C1 IOSTANDARD DIFF_SSTL135} [get_ports sys_clk_p]
+set_property -dict {PACKAGE_PIN B1 IOSTANDARD DIFF_SSTL135} [get_ports sys_clk_n]
+create_clock -period 10.000 -name sys_clk [get_ports sys_clk_p]
 
 # -----------------------------------------------------------------------------
 # Reset push-button (btn[0], J2, LVCMOS25, ACTIVE-LOW).
@@ -40,6 +39,16 @@ set_property -dict {PACKAGE_PIN J2 IOSTANDARD LVCMOS25 PULLUP true} [get_ports r
 # -----------------------------------------------------------------------------
 set_property -dict {PACKAGE_PIN A16 IOSTANDARD LVCMOS33} [get_ports uart_tx_pin]
 set_property -dict {PACKAGE_PIN B16 IOSTANDARD LVCMOS33 PULLUP true} [get_ports uart_rx_pin]
+
+# -----------------------------------------------------------------------------
+# Clock-domain crossings — soc_rst_sync
+# -----------------------------------------------------------------------------
+# soc_rdy_async ANDs signals from alivesys (rst_n), an async ext_mmcm_locked,
+# and clk_pll_i-domain signals (mmcm_locked / init_calib_complete /
+# ui_clk_sync_rst), and samples the combined level into a 3-stage ASYNC_REG
+# synchronizer on soc_clk. Scope the false_path tightly to the first flop of
+# the chain so axi_clock_converter's own async FIFO constraints still apply.
+set_false_path -to [get_pins {soc_rst_sync_reg[0]/D}]
 
 # -----------------------------------------------------------------------------
 # First 8 user LEDs (LVCMOS33)

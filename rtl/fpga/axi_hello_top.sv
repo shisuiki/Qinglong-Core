@@ -19,7 +19,17 @@
 //   N15  (100 MHz LVCMOS33)  -> alive_clk  (heartbeat LED only — proves the
 //                                          FPGA is configured even if MIG
 //                                          fails to calibrate).
-//   C1/B1 (100 MHz LVDS_25)  -> MIG -> ui_clk (≈83 MHz @ 666 MT/s) -> SoC.
+//   C1/B1 (100 MHz diff)     -> IBUFGDS -> user MMCM:
+//                                  CLKOUT0 = 333.333 MHz -> MIG sys_clk_i
+//                                  CLKOUT1 = 200 MHz     -> MIG clk_ref_i
+//                                  CLKOUT2 = 50  MHz     -> soc_clk
+//                              MIG runs PHY 2:1, so ui_clk = mem_clk / 2
+//                              ≈ 166.7 MHz. The multicycle core can't close
+//                              at 166 MHz (35ns / 56-logic-level EX path), so
+//                              the SoC, crossbar, protocol converter, and
+//                              UartLite all run on soc_clk (50 MHz). An
+//                              axi_clock_converter bridges crossbar M00
+//                              (soc_clk) to MIG.s_axi (ui_clk).
 //
 // Reset:
 //   BTN0 (J2, active-low) -> sync to alive_clk -> MIG.sys_rst (active low).
@@ -46,7 +56,9 @@ module axi_hello_top #(
     input  wire        clk,            // 100 MHz LVCMOS33 (N15) — heartbeat only
     input  wire        rst_n,          // BTN0, active-low (J2)
 
-    // MIG7 system clock (dedicated diff pair @ C1/B1, LVDS_25)
+    // 100 MHz differential reference for MIG @ C1/B1 (DIFF_SSTL135).
+    // MIG itself sees a pre-buffered single-ended clock — see the IBUFGDS +
+    // MMCM block below.
     input  wire        sys_clk_p,
     input  wire        sys_clk_n,
 
@@ -87,13 +99,90 @@ module axi_hello_top #(
         rst_n_alive <= rst_n_meta;
     end
 
+    // ---------- External MMCM for MIG sys + ref clocks ----------
+    // The Urbana DDR3 pinout placed lane-D's BUFIO out of reach when MIG
+    // owned the input MMCM in PHY 4:1 mode. Switching to PHY 2:1 + an
+    // externally-buffered 333 MHz clock matches RealDigital's verified
+    // DDRtest reference and makes lane-D routable.
+    //
+    // 100 MHz in -> VCO 1000 MHz:
+    //   CLKOUT0 = 333.333 MHz  -> MIG sys_clk_i
+    //   CLKOUT1 = 200    MHz   -> MIG clk_ref_i (IDELAYCTRL)
+    //   CLKOUT2 =  50    MHz   -> soc_clk (user fabric)
+    wire sys_clk_ibufds;
+    IBUFGDS #(
+        .DIFF_TERM   ("FALSE"),
+        .IBUF_LOW_PWR("FALSE"),
+        .IOSTANDARD  ("DIFF_SSTL135")
+    ) u_sysclk_ibufds (
+        .I (sys_clk_p),
+        .IB(sys_clk_n),
+        .O (sys_clk_ibufds)
+    );
+
+    wire mig_sys_clk_pre;
+    wire mig_clk_ref_pre;
+    wire soc_clk_pre;
+    wire mmcm_fb;
+    wire ext_mmcm_locked;
+    MMCME2_BASE #(
+        .BANDWIDTH         ("OPTIMIZED"),
+        .CLKIN1_PERIOD     (10.000),    // 100 MHz input
+        .DIVCLK_DIVIDE     (1),
+        .CLKFBOUT_MULT_F   (10.000),    // VCO = 1000 MHz
+        .CLKFBOUT_PHASE    (0.000),
+        .CLKOUT0_DIVIDE_F  (3.000),     // 1000 / 3   ≈ 333.333 MHz
+        .CLKOUT0_PHASE     (0.000),
+        .CLKOUT0_DUTY_CYCLE(0.500),
+        .CLKOUT1_DIVIDE    (5),         // 1000 / 5   = 200 MHz (IDELAYCTRL)
+        .CLKOUT1_PHASE     (0.000),
+        .CLKOUT1_DUTY_CYCLE(0.500),
+        .CLKOUT2_DIVIDE    (20),        // 1000 / 20  = 50  MHz (soc_clk)
+        .CLKOUT2_PHASE     (0.000),
+        .CLKOUT2_DUTY_CYCLE(0.500),
+        .REF_JITTER1       (0.010),
+        .STARTUP_WAIT      ("FALSE")
+    ) u_sysclk_mmcm (
+        .CLKIN1   (sys_clk_ibufds),
+        .CLKFBIN  (mmcm_fb),
+        .CLKFBOUT (mmcm_fb),
+        .CLKFBOUTB(),
+        .CLKOUT0  (mig_sys_clk_pre),
+        .CLKOUT0B (),
+        .CLKOUT1  (mig_clk_ref_pre),
+        .CLKOUT1B (),
+        .CLKOUT2  (soc_clk_pre),
+        .CLKOUT2B (),
+        .CLKOUT3  (), .CLKOUT3B(),
+        .CLKOUT4  (),
+        .CLKOUT5  (),
+        .CLKOUT6  (),
+        .LOCKED   (ext_mmcm_locked),
+        .PWRDWN   (1'b0),
+        .RST      (1'b0)
+    );
+
+    wire mig_sys_clk;
+    wire mig_clk_ref;
+    wire soc_clk;
+    BUFG u_bufg_mig_sys (.I(mig_sys_clk_pre), .O(mig_sys_clk));
+    BUFG u_bufg_mig_ref (.I(mig_clk_ref_pre), .O(mig_clk_ref));
+    BUFG u_bufg_soc     (.I(soc_clk_pre),     .O(soc_clk));
+
+    // Hold MIG in reset until our own MMCM is locked (otherwise its inputs
+    // are toggling but their frequency is undefined).
+    wire mig_sys_rst_n = rst_n_alive & ext_mmcm_locked;
+
     // ---------- MIG7 DDR3L controller ----------
     wire ui_clk;
     wire ui_clk_sync_rst;
     wire mmcm_locked;
     wire init_calib_complete;
 
-    // MIG AXI4 slave port (27-bit addr — 1Gbit / 128 MB total)
+    // MIG AXI4 slave port (ui_clk domain, 27-bit addr — 128 MB total).
+    // Driven by axi_clock_converter_0's M side; IDs not used (xbar dropped them).
+    wire [31:0] mig_awaddr_full;
+    wire [31:0] mig_araddr_full;
     wire [3:0]  mig_awid    = 4'd0;
     wire [26:0] mig_awaddr;
     wire [7:0]  mig_awlen;
@@ -132,6 +221,9 @@ module axi_hello_top #(
     wire        mig_rvalid;
     wire        mig_rready;
 
+    assign mig_awaddr = mig_awaddr_full[26:0];
+    assign mig_araddr = mig_araddr_full[26:0];
+
     mig_ddr3_0 u_mig (
         // DDR3 physical
         .ddr3_dq      (ddr3_dq),
@@ -149,10 +241,10 @@ module axi_hello_top #(
         .ddr3_dm      (ddr3_dm),
         .ddr3_odt     (ddr3_odt),
 
-        // System
-        .sys_clk_p    (sys_clk_p),
-        .sys_clk_n    (sys_clk_n),
-        .sys_rst      (rst_n_alive),       // active-low (matches PRJ)
+        // System (No Buffer mode — sys_clk_i / clk_ref_i are pre-buffered).
+        .sys_clk_i    (mig_sys_clk),
+        .clk_ref_i    (mig_clk_ref),
+        .sys_rst      (mig_sys_rst_n),     // active-low (matches PRJ)
 
         // User clock + status
         .ui_clk             (ui_clk),
@@ -217,8 +309,21 @@ module axi_hello_top #(
         .s_axi_rready (mig_rready)
     );
 
-    // ---------- SoC reset (held until MIG calibrates) ----------
-    wire soc_rst = ui_clk_sync_rst | ~init_calib_complete;
+    // ---------- SoC reset (in soc_clk domain) ----------
+    // Everything user-side (SoC core, crossbar, protocol converter, UartLite)
+    // runs on soc_clk. Hold it in reset until BTN, both MMCMs and MIG calib
+    // are all ready. The axi_clock_converter crosses into ui_clk for MIG.
+    wire soc_rdy_async = rst_n_alive & ext_mmcm_locked & mmcm_locked
+                         & init_calib_complete & ~ui_clk_sync_rst;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] soc_rst_sync = 3'b000;
+    always_ff @(posedge soc_clk) begin
+        soc_rst_sync <= {soc_rst_sync[1:0], soc_rdy_async};
+    end
+    wire soc_rst = ~soc_rst_sync[2];
+
+    // ui_clk-side reset for the converter's M port — MIG already provides
+    // ui_clk_sync_rst synchronized to ui_clk.
+    wire ui_aresetn = ~ui_clk_sync_rst;
 
     // ---------- AXI4 master out of soc_top ----------
     wire        m_axi_awvalid, m_axi_awready;
@@ -269,7 +374,7 @@ module axi_hello_top #(
         .RESET_PC       (32'h8000_0000),
         .SRAM_INIT_FILE (SRAM_INIT_FILE)
     ) u_soc (
-        .clk(ui_clk), .rst(soc_rst),
+        .clk(soc_clk), .rst(soc_rst),
 
         .console_valid(console_valid), .console_byte(console_byte),
         .console_ready(1'b1),
@@ -304,13 +409,29 @@ module axi_hello_top #(
         .commit_trap(commit_trap), .commit_cause(commit_cause)
     );
 
-    // ---------- AXI4 1×2 crossbar (M00 = MIG, M01 = uart-via-protoconv) ----------
+    // ---------- AXI4 1×2 crossbar (M00 → soc_clk→ui_clk CDC → MIG, M01 → uart) ----------
     // Crossbar M-side concatenation puts M00 at low bits, M01 at high bits.
     // Crossbar drops AXI IDs (NUM_SI=1, in-order responses).
-    wire [31:0] mig_awaddr_full;       // 32 bits from xbar; MIG only takes [26:0]
-    wire [31:0] mig_araddr_full;
-    wire [3:0]  mig_awregion_unused;   // MIG has no awregion port
-    wire [3:0]  mig_arregion_unused;
+    //
+    // M00 exits the crossbar on soc_clk (xm_*) and crosses into ui_clk via
+    // axi_clock_converter_0 before landing on MIG.s_axi.
+    wire [31:0] xm_awaddr;    wire [7:0]  xm_awlen;
+    wire [2:0]  xm_awsize;    wire [1:0]  xm_awburst;
+    wire        xm_awlock;    wire [3:0]  xm_awcache;
+    wire [2:0]  xm_awprot;    wire [3:0]  xm_awqos;
+    wire        xm_awvalid;   wire        xm_awready;
+    wire [31:0] xm_wdata;     wire [3:0]  xm_wstrb;
+    wire        xm_wlast;     wire        xm_wvalid;    wire xm_wready;
+    wire [1:0]  xm_bresp;     wire        xm_bvalid;    wire xm_bready;
+    wire [31:0] xm_araddr;    wire [7:0]  xm_arlen;
+    wire [2:0]  xm_arsize;    wire [1:0]  xm_arburst;
+    wire        xm_arlock;    wire [3:0]  xm_arcache;
+    wire [2:0]  xm_arprot;    wire [3:0]  xm_arqos;
+    wire        xm_arvalid;   wire        xm_arready;
+    wire [31:0] xm_rdata;     wire [1:0]  xm_rresp;
+    wire        xm_rlast;     wire        xm_rvalid;    wire xm_rready;
+    wire [3:0]  xm_awregion_unused;   // xbar emits awregion; converter/MIG don't
+    wire [3:0]  xm_arregion_unused;
 
     // M01 (protocol_converter slave-side) signals
     wire        pc_awvalid, pc_awready;
@@ -344,11 +465,8 @@ module axi_hello_top #(
     wire [1:0]  pc_rresp;
     wire        pc_rlast;
 
-    assign mig_awaddr = mig_awaddr_full[26:0];
-    assign mig_araddr = mig_araddr_full[26:0];
-
     axi_crossbar_0 u_xbar (
-        .aclk    (ui_clk),
+        .aclk    (soc_clk),
         .aresetn (~soc_rst),
 
         // S00 — from soc_top
@@ -394,46 +512,134 @@ module axi_hello_top #(
         .s_axi_rvalid  (m_axi_rvalid),
         .s_axi_rready  (m_axi_rready),
 
-        // M-side: M00 = MIG (low bits), M01 = uart-via-pc (high bits).
-        .m_axi_awaddr  ({pc_awaddr,   mig_awaddr_full}),
-        .m_axi_awlen   ({pc_awlen,    mig_awlen}),
-        .m_axi_awsize  ({pc_awsize,   mig_awsize}),
-        .m_axi_awburst ({pc_awburst,  mig_awburst}),
-        .m_axi_awlock  ({pc_awlock,   mig_awlock}),
-        .m_axi_awcache ({pc_awcache,  mig_awcache}),
-        .m_axi_awprot  ({pc_awprot,   mig_awprot}),
-        .m_axi_awregion({pc_awregion, mig_awregion_unused}),
-        .m_axi_awqos   ({pc_awqos,    mig_awqos}),
-        .m_axi_awvalid ({pc_awvalid,  mig_awvalid}),
-        .m_axi_awready ({pc_awready,  mig_awready}),
+        // M-side: M00 = MIG branch (soc_clk side of converter), M01 = uart-via-pc.
+        .m_axi_awaddr  ({pc_awaddr,   xm_awaddr}),
+        .m_axi_awlen   ({pc_awlen,    xm_awlen}),
+        .m_axi_awsize  ({pc_awsize,   xm_awsize}),
+        .m_axi_awburst ({pc_awburst,  xm_awburst}),
+        .m_axi_awlock  ({pc_awlock,   xm_awlock}),
+        .m_axi_awcache ({pc_awcache,  xm_awcache}),
+        .m_axi_awprot  ({pc_awprot,   xm_awprot}),
+        .m_axi_awregion({pc_awregion, xm_awregion_unused}),
+        .m_axi_awqos   ({pc_awqos,    xm_awqos}),
+        .m_axi_awvalid ({pc_awvalid,  xm_awvalid}),
+        .m_axi_awready ({pc_awready,  xm_awready}),
 
-        .m_axi_wdata   ({pc_wdata,    mig_wdata}),
-        .m_axi_wstrb   ({pc_wstrb,    mig_wstrb}),
-        .m_axi_wlast   ({pc_wlast,    mig_wlast}),
-        .m_axi_wvalid  ({pc_wvalid,   mig_wvalid}),
-        .m_axi_wready  ({pc_wready,   mig_wready}),
+        .m_axi_wdata   ({pc_wdata,    xm_wdata}),
+        .m_axi_wstrb   ({pc_wstrb,    xm_wstrb}),
+        .m_axi_wlast   ({pc_wlast,    xm_wlast}),
+        .m_axi_wvalid  ({pc_wvalid,   xm_wvalid}),
+        .m_axi_wready  ({pc_wready,   xm_wready}),
 
-        .m_axi_bresp   ({pc_bresp,    mig_bresp}),
-        .m_axi_bvalid  ({pc_bvalid,   mig_bvalid}),
-        .m_axi_bready  ({pc_bready,   mig_bready}),
+        .m_axi_bresp   ({pc_bresp,    xm_bresp}),
+        .m_axi_bvalid  ({pc_bvalid,   xm_bvalid}),
+        .m_axi_bready  ({pc_bready,   xm_bready}),
 
-        .m_axi_araddr  ({pc_araddr,   mig_araddr_full}),
-        .m_axi_arlen   ({pc_arlen,    mig_arlen}),
-        .m_axi_arsize  ({pc_arsize,   mig_arsize}),
-        .m_axi_arburst ({pc_arburst,  mig_arburst}),
-        .m_axi_arlock  ({pc_arlock,   mig_arlock}),
-        .m_axi_arcache ({pc_arcache,  mig_arcache}),
-        .m_axi_arprot  ({pc_arprot,   mig_arprot}),
-        .m_axi_arregion({pc_arregion, mig_arregion_unused}),
-        .m_axi_arqos   ({pc_arqos,    mig_arqos}),
-        .m_axi_arvalid ({pc_arvalid,  mig_arvalid}),
-        .m_axi_arready ({pc_arready,  mig_arready}),
+        .m_axi_araddr  ({pc_araddr,   xm_araddr}),
+        .m_axi_arlen   ({pc_arlen,    xm_arlen}),
+        .m_axi_arsize  ({pc_arsize,   xm_arsize}),
+        .m_axi_arburst ({pc_arburst,  xm_arburst}),
+        .m_axi_arlock  ({pc_arlock,   xm_arlock}),
+        .m_axi_arcache ({pc_arcache,  xm_arcache}),
+        .m_axi_arprot  ({pc_arprot,   xm_arprot}),
+        .m_axi_arregion({pc_arregion, xm_arregion_unused}),
+        .m_axi_arqos   ({pc_arqos,    xm_arqos}),
+        .m_axi_arvalid ({pc_arvalid,  xm_arvalid}),
+        .m_axi_arready ({pc_arready,  xm_arready}),
 
-        .m_axi_rdata   ({pc_rdata,    mig_rdata}),
-        .m_axi_rresp   ({pc_rresp,    mig_rresp}),
-        .m_axi_rlast   ({pc_rlast,    mig_rlast}),
-        .m_axi_rvalid  ({pc_rvalid,   mig_rvalid}),
-        .m_axi_rready  ({pc_rready,   mig_rready})
+        .m_axi_rdata   ({pc_rdata,    xm_rdata}),
+        .m_axi_rresp   ({pc_rresp,    xm_rresp}),
+        .m_axi_rlast   ({pc_rlast,    xm_rlast}),
+        .m_axi_rvalid  ({pc_rvalid,   xm_rvalid}),
+        .m_axi_rready  ({pc_rready,   xm_rready})
+    );
+
+    // ---------- AXI4 clock converter (soc_clk ↔ ui_clk) ----------
+    // S port on soc_clk (50 MHz), M port on ui_clk (~166.7 MHz). Same widths
+    // on both sides; ID_WIDTH=0 because the crossbar already dropped IDs.
+    axi_clock_converter_0 u_axi_cc (
+        .s_axi_aclk    (soc_clk),
+        .s_axi_aresetn (~soc_rst),
+        .m_axi_aclk    (ui_clk),
+        .m_axi_aresetn (ui_aresetn),
+
+        // S — from xbar M00 (soc_clk)
+        .s_axi_awaddr  (xm_awaddr),
+        .s_axi_awlen   (xm_awlen),
+        .s_axi_awsize  (xm_awsize),
+        .s_axi_awburst (xm_awburst),
+        .s_axi_awlock  (xm_awlock),
+        .s_axi_awcache (xm_awcache),
+        .s_axi_awprot  (xm_awprot),
+        .s_axi_awqos   (xm_awqos),
+        .s_axi_awvalid (xm_awvalid),
+        .s_axi_awready (xm_awready),
+
+        .s_axi_wdata   (xm_wdata),
+        .s_axi_wstrb   (xm_wstrb),
+        .s_axi_wlast   (xm_wlast),
+        .s_axi_wvalid  (xm_wvalid),
+        .s_axi_wready  (xm_wready),
+
+        .s_axi_bresp   (xm_bresp),
+        .s_axi_bvalid  (xm_bvalid),
+        .s_axi_bready  (xm_bready),
+
+        .s_axi_araddr  (xm_araddr),
+        .s_axi_arlen   (xm_arlen),
+        .s_axi_arsize  (xm_arsize),
+        .s_axi_arburst (xm_arburst),
+        .s_axi_arlock  (xm_arlock),
+        .s_axi_arcache (xm_arcache),
+        .s_axi_arprot  (xm_arprot),
+        .s_axi_arqos   (xm_arqos),
+        .s_axi_arvalid (xm_arvalid),
+        .s_axi_arready (xm_arready),
+
+        .s_axi_rdata   (xm_rdata),
+        .s_axi_rresp   (xm_rresp),
+        .s_axi_rlast   (xm_rlast),
+        .s_axi_rvalid  (xm_rvalid),
+        .s_axi_rready  (xm_rready),
+
+        // M — into MIG.s_axi (ui_clk)
+        .m_axi_awaddr  (mig_awaddr_full),
+        .m_axi_awlen   (mig_awlen),
+        .m_axi_awsize  (mig_awsize),
+        .m_axi_awburst (mig_awburst),
+        .m_axi_awlock  (mig_awlock),
+        .m_axi_awcache (mig_awcache),
+        .m_axi_awprot  (mig_awprot),
+        .m_axi_awqos   (mig_awqos),
+        .m_axi_awvalid (mig_awvalid),
+        .m_axi_awready (mig_awready),
+
+        .m_axi_wdata   (mig_wdata),
+        .m_axi_wstrb   (mig_wstrb),
+        .m_axi_wlast   (mig_wlast),
+        .m_axi_wvalid  (mig_wvalid),
+        .m_axi_wready  (mig_wready),
+
+        .m_axi_bresp   (mig_bresp),
+        .m_axi_bvalid  (mig_bvalid),
+        .m_axi_bready  (mig_bready),
+
+        .m_axi_araddr  (mig_araddr_full),
+        .m_axi_arlen   (mig_arlen),
+        .m_axi_arsize  (mig_arsize),
+        .m_axi_arburst (mig_arburst),
+        .m_axi_arlock  (mig_arlock),
+        .m_axi_arcache (mig_arcache),
+        .m_axi_arprot  (mig_arprot),
+        .m_axi_arqos   (mig_arqos),
+        .m_axi_arvalid (mig_arvalid),
+        .m_axi_arready (mig_arready),
+
+        .m_axi_rdata   (mig_rdata),
+        .m_axi_rresp   (mig_rresp),
+        .m_axi_rlast   (mig_rlast),
+        .m_axi_rvalid  (mig_rvalid),
+        .m_axi_rready  (mig_rready)
     );
 
     // ---------- AXI4 → AXI4-Lite protocol converter ----------
@@ -453,7 +659,7 @@ module axi_hello_top #(
     wire [1:0]  ul_rresp;
 
     axi_protocol_converter_0 u_proto_conv (
-        .aclk    (ui_clk),
+        .aclk    (soc_clk),
         .aresetn (~soc_rst),
 
         .s_axi_awid    (4'd0),         // crossbar drops IDs
@@ -525,7 +731,7 @@ module axi_hello_top #(
     // ---------- AMD AXI UartLite ----------
     wire uartlite_irq;
     axi_uartlite_0 u_uartlite (
-        .s_axi_aclk   (ui_clk),
+        .s_axi_aclk   (soc_clk),
         .s_axi_aresetn(~soc_rst),
 
         .s_axi_awaddr (ul_awaddr[3:0]),
@@ -557,7 +763,7 @@ module axi_hello_top #(
 
     // ---------- LED indicators ----------
     reg [19:0] commit_stretch = 20'd0;
-    always_ff @(posedge ui_clk) begin
+    always_ff @(posedge soc_clk) begin
         if (soc_rst) begin
             commit_stretch <= 20'd0;
         end else if (commit_valid) begin
@@ -568,7 +774,7 @@ module axi_hello_top #(
     end
 
     reg console_seen = 1'b0;
-    always_ff @(posedge ui_clk) begin
+    always_ff @(posedge soc_clk) begin
         if (soc_rst)            console_seen <= 1'b0;
         else if (console_valid) console_seen <= 1'b1;
     end
