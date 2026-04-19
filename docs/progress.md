@@ -2,6 +2,18 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-19 — Stage 6C-9: U-mode MMU integration test
+
+### What shipped
+- **`sw/tests/asm/mmu_umode.S`** — first test that actually runs the core at priv=U with MMU on. Exercises the full chain: user ifetch through an X=1 U=1 leaf (`VA 0x82000000 -> PA 0x80002000`), user load through a second R=1 U=1 leaf (`VA 0x82001000 -> PA 0x80003000`), and ECALL_FROM_U back to M-mode mtvec. Prior MMU tests drove everything from M-mode via MPRV or from S-mode via MRET — U-mode fetch translation via the ifetch PTW path was covered in theory by 6C-2b but never end-to-end.
+
+The test position-independently stages user code from a `.text.init` thunk into `CODE_PA`, MRETs to `CODE_VA` with MPP=U, and relies on the mtvec handler checking both `mcause==8` and `a0==0x12345` (a witness value the user code sets before ECALL). If either TLB fill or permission check had U-mode bugs, the ifetch or lw would trap long before the ECALL.
+
+### Tests
+- **`mmu_umode.elf`**: PASS on both cores.
+- **Full regression**: 74/76 unchanged.
+- **All prior MMU/PMP asm tests**: PASS unchanged.
+
 ## 2026-04-18 — Stage 6C-8: MXR + SUM semantic tests
 
 ### What shipped
