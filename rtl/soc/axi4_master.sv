@@ -88,7 +88,14 @@ module axi4_master #(
     logic        rsp_valid_q, rsp_fault_q;
     logic [31:0] rsp_rdata_q;
 
-    assign req_ready  = (state_q == S_IDLE);
+    // req_ready must drop while rsp_valid is pulsing so the core can't issue
+    // a fresh req in the same cycle it sees the previous response — that race
+    // corrupts the shim's addr/data latches with a stale in-flight request.
+    // Additionally: on silicon, back-to-back DDR ops through axi_clock_converter
+    // hang after the 2nd op — adding a brief cooldown between responses and
+    // the next request works around this until we root-cause the CDC interaction.
+    logic [3:0] cooldown_q;
+    assign req_ready  = (state_q == S_IDLE) && !rsp_valid_q && (cooldown_q == 4'd0);
     assign rsp_valid  = rsp_valid_q;
     assign rsp_rdata  = rsp_rdata_q;
     assign rsp_fault  = rsp_fault_q;
@@ -138,13 +145,22 @@ module axi4_master #(
             rsp_valid_q <= 1'b0;
             rsp_rdata_q <= 32'd0;
             rsp_fault_q <= 1'b0;
+            cooldown_q  <= 4'd0;
         end else begin
             rsp_valid_q <= 1'b0;
             rsp_fault_q <= 1'b0;
+            if (cooldown_q != 4'd0) cooldown_q <= cooldown_q - 4'd1;
 
             unique case (state_q)
                 S_IDLE: begin
-                    if (req_valid) begin
+                    // Require the full handshake (req_valid AND req_ready).
+                    // req_ready is gated by !rsp_valid_q and cooldown_q==0, so
+                    // without this check we'd latch req_addr during a cooldown
+                    // or rsp-pulse window where the core hasn't yet considered
+                    // its req "fired", but we've internally started a new txn.
+                    // That leaves the pipeline with a phantom transaction whose
+                    // response may be consumed by the wrong op.
+                    if (req_valid && req_ready) begin
                         addr_q    <= req_addr;
                         wdata_q   <= req_wdata;
                         wmask_q   <= req_wmask;
@@ -169,6 +185,7 @@ module axi4_master #(
                         rsp_rdata_q <= 32'd0;
                         rsp_fault_q <= (m_axi_bresp != 2'b00);
                         state_q     <= S_IDLE;
+                        cooldown_q  <= 4'd8;
                     end
                 end
 
@@ -184,6 +201,12 @@ module axi4_master #(
                         rsp_rdata_q <= m_axi_rdata;
                         rsp_fault_q <= (m_axi_rresp != 2'b00);
                         state_q     <= S_IDLE;
+                        cooldown_q  <= 4'd8;
+`ifdef VERILATOR
+                        if (m_axi_rresp != 2'b00) begin
+                            $display("[AXIM-READ-FAULT] addr=%08x rresp=%0d", addr_q, m_axi_rresp);
+                        end
+`endif
                     end
                 end
 
