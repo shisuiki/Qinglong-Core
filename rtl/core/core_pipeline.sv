@@ -62,6 +62,7 @@ module core_pipeline #(
     input  logic        ext_mti,
     input  logic        ext_msi,
     input  logic        ext_mei,
+    input  logic        ext_sei,
 
     // ---- commit trace ----
     output logic        commit_valid,
@@ -292,7 +293,14 @@ module core_pipeline #(
 
     assign ifetch_req_valid = if_can_issue && !rst;
     assign ifetch_req_addr  = pc_q;
-    assign ifetch_rsp_ready = 1'b1;
+    // Only assert rsp_ready when a fetch is in-flight. If the MMU delivers
+    // a same-cycle rsp (e.g. walk-result pagefault fires req_ready=1 and
+    // rsp_valid=1 simultaneously), the MMU's if_fault_rsp_done sees our
+    // rsp_ready and clears if_xlate_valid_q next cycle — but we only sample
+    // rsp_arriving on the cycle *after* the handshake (fetch_inflight_q=1),
+    // so the rsp would be silently dropped. Gating rsp_ready keeps the MMU
+    // holding the rsp/valid_q through the cycle we actually latch it.
+    assign ifetch_rsp_ready = fetch_inflight_q;
 
     wire rsp_arriving   = fetch_inflight_q && ifetch_rsp_valid;
     wire rsp_consumable = rsp_arriving && !fetch_squash_q;
@@ -569,7 +577,21 @@ module core_pipeline #(
     // MEM stall: MEM holds a load/store and the dmem handshake hasn't finished.
     wire mem_busy = mem_valid_q && mem_ls_pending_q;
 
-    assign stall_mem = mem_busy;
+    // csrw satp in MEM must stall until any in-flight ifetch response has
+    // drained. If the pre-satp speculative fetch for pc+4 is still in the
+    // MMU/fabric and satp flips to Sv32 first, the MMU switches from bare
+    // passthrough to needs-walk mid-transaction and silently swallows the
+    // arriving bare-mode response (if_ds_rsp_ready=1 but if_core_rsp_valid=0
+    // in the walk branch). The pipeline then deadlocks with fetch_inflight_q=1.
+    // Hold the csrw until the fetch returns so satp flips only when the
+    // pipeline is quiesced.
+    wire mem_is_csr_op    = mem_valid_q && !mem_trap_q &&
+                            (mem_instr_q[6:0]   == `OP_SYSTEM) &&
+                            (mem_instr_q[14:12] != `F3_PRIV);
+    wire mem_is_csrw_satp = mem_is_csr_op && (mem_instr_q[31:20] == `CSR_SATP);
+    wire mem_stall_for_ifetch_drain = mem_is_csrw_satp && fetch_inflight_q;
+
+    assign stall_mem = mem_busy || mem_stall_for_ifetch_drain;
     assign stall_ex  = stall_mem || ex_div_stall;
     assign stall_id  = stall_ex || load_use_hazard ||
                        (id_valid_q && id_is_serial && pipe_busy_ahead_of_id) ||
@@ -1321,6 +1343,7 @@ module core_pipeline #(
         .mret(mret_wb), .sret(sret_wb),
         .retire(retire_wb),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
+        .ext_sei(ext_sei),
         .mtvec(mtvec_v), .stvec(stvec_v),
         .mepc_out(mepc_v), .sepc_out(sepc_v),
         .priv_mode(priv_mode_v), .trap_to_s(trap_to_s_v),
@@ -1353,6 +1376,7 @@ module core_pipeline #(
     end
 `endif
 
+
     // Regfile write
     assign rf_wen     = wb_valid_q && wb_rd_wen_q && !wb_trap_q && (wb_rd_q != 5'd0);
     assign rf_rd_addr = wb_rd_q;
@@ -1384,8 +1408,23 @@ module core_pipeline #(
                                  (wb_instr_q[6:0]   == `OP_SYSTEM) &&
                                  (wb_instr_q[14:12] == `F3_PRIV) &&
                                  (wb_instr_q[31:25] == 7'b0001001);
+    // A CSR write that changes satp (mode/asid/ppn) must also redirect:
+    // in-flight fetches past the csrw were translated under the old satp,
+    // and post-csrw instructions must be translated under the new one.
+    // Match any CSR opcode (funct3 != 000, i.e. !F3_PRIV) targeting CSR_SATP.
+    // Detected at WB so the pipeline ahead is empty by the time we redirect.
+    // Without this, Linux's `sfence.vma; csrw satp` turn-on-MMU sequence
+    // leaves a pre-satp fetch for pc+4 in IF/ID translated under satp=0,
+    // which on our memory map sends it to the UART aperture (0xC...) and
+    // the pipeline hangs silently after executing the garbage response.
+    wire wb_is_csr_op    = wb_valid_q && !wb_trap_q &&
+                           (wb_instr_q[6:0]   == `OP_SYSTEM) &&
+                           (wb_instr_q[14:12] != `F3_PRIV);
+    wire wb_is_csrw_satp = wb_is_csr_op && (wb_instr_q[31:20] == `CSR_SATP);
     assign wb_redirect = wb_valid_q && (wb_trap_q || wb_is_mret_q || wb_is_sret_q ||
-                                        wb_is_fence_i || wb_is_sfence_redirect);
+                                        wb_is_fence_i || wb_is_sfence_redirect ||
+                                        wb_is_csrw_satp);
+
     always_comb begin
         // Default: M-mode trap vector.
         wb_redirect_pc = {mtvec_v[31:2], 2'b00};
@@ -1393,7 +1432,7 @@ module core_pipeline #(
             wb_redirect_pc = mepc_v;
         end else if (wb_is_sret_q && !wb_trap_q) begin
             wb_redirect_pc = sepc_v;
-        end else if (wb_is_fence_i || wb_is_sfence_redirect) begin
+        end else if (wb_is_fence_i || wb_is_sfence_redirect || wb_is_csrw_satp) begin
             wb_redirect_pc = wb_pc_q + 32'd4;
         end else if (wb_trap_q && trap_to_s_v) begin
             // Trap delegated to S-mode.
