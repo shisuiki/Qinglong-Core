@@ -177,7 +177,10 @@ generate_target {synthesis simulation} [get_ips mig_ddr3_0]
 # treating ddr3_reset_n's IOB (M5 = IOB_X1Y37) as a DQ slot and emitting an
 # unplaceable ISERDES/OSERDES pair in byte_lane_D slot 0. Clear that bit in
 # the generated RTL before synth_ip so the SERDES are never instantiated.
-set mig_rtl [file join $ip_dir mig_ddr3_0 mig_ddr3_0 user_design rtl mig_ddr3_0_mig.v]
+# Vivado may disambiguate a re-run as mig_ddr3_0_1 if the old dir still
+# exists — look up the actual generated path instead of hardcoding.
+set mig_ip_dir [get_property IP_DIR [get_ips mig_ddr3_0]]
+set mig_rtl [file join $mig_ip_dir mig_ddr3_0 user_design rtl mig_ddr3_0_mig.v]
 if {[file exists $mig_rtl]} {
     set fh [open $mig_rtl r]; set content [read $fh]; close $fh
     set patched [regsub {PHY_0_BITLANES(\s+)=(\s+)48'h3FF_3FE_FFF_B7B} $content {PHY_0_BITLANES\1=\2 48'h3FE_3FE_FFF_B7B} content]
