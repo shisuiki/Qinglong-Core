@@ -7,7 +7,7 @@
     model          = "RealDigital Urbana RV32IMA SoC";
 
     chosen {
-        bootargs       = "console=ttyUL0,115200 earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug nosoftlockup";
+        bootargs       = "console=ttyUL0,115200 earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug";
         stdout-path    = "/soc/serial@c0000000";
         /* rootfs.cpio (uncompressed, ~20 MB) staged at 0x43000000; DDR
          * ends at 0x48000000 so cover the full uncompressed range. */

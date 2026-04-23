@@ -136,53 +136,6 @@ module soc_top #(
     logic        core_dm_rsp_valid, core_dm_rsp_fault, core_dm_rsp_ready;
     logic [31:0] core_dm_rsp_rdata;
 
-    // ---------- Dmem req pipeline stage (soc_clk timing closure) ----------
-    // Breaks the long combinational path mem_alu_y_q → TLB-lookup →
-    // dm_xlate_pa_q/CE inside MMU (WNS was -0.574 ns at 50 MHz). Registers the
-    // core-side req here; MMU's internal logic now drives from a local FF.
-    // Handshake: ready when the register is empty OR its downstream accepted
-    // this cycle, so back-to-back txns still flow at 1/cycle when MMU is
-    // ready. Response path (rdata/valid/fault) stays direct, not pipelined.
-    logic        mmu_dm_req_valid, mmu_dm_req_ready;
-    logic [31:0] mmu_dm_req_addr, mmu_dm_req_wdata;
-    logic        mmu_dm_req_wen;
-    logic [3:0]  mmu_dm_req_wmask;
-    logic [1:0]  mmu_dm_req_size;
-
-    logic        dm_pipe_q_valid;
-    logic [31:0] dm_pipe_q_addr, dm_pipe_q_wdata;
-    logic        dm_pipe_q_wen;
-    logic [3:0]  dm_pipe_q_wmask;
-    logic [1:0]  dm_pipe_q_size;
-
-    wire dm_pipe_up_fire = core_dm_req_valid && core_dm_req_ready;
-    wire dm_pipe_dn_fire = mmu_dm_req_valid  && mmu_dm_req_ready;
-
-    assign core_dm_req_ready = !dm_pipe_q_valid || mmu_dm_req_ready;
-    assign mmu_dm_req_valid  = dm_pipe_q_valid;
-    assign mmu_dm_req_addr   = dm_pipe_q_addr;
-    assign mmu_dm_req_wen    = dm_pipe_q_wen;
-    assign mmu_dm_req_wdata  = dm_pipe_q_wdata;
-    assign mmu_dm_req_wmask  = dm_pipe_q_wmask;
-    assign mmu_dm_req_size   = dm_pipe_q_size;
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            dm_pipe_q_valid <= 1'b0;
-        end else begin
-            if (dm_pipe_up_fire) begin
-                dm_pipe_q_valid <= 1'b1;
-                dm_pipe_q_addr  <= core_dm_req_addr;
-                dm_pipe_q_wen   <= core_dm_req_wen;
-                dm_pipe_q_wdata <= core_dm_req_wdata;
-                dm_pipe_q_wmask <= core_dm_req_wmask;
-                dm_pipe_q_size  <= core_dm_req_size;
-            end else if (dm_pipe_dn_fire) begin
-                dm_pipe_q_valid <= 1'b0;
-            end
-        end
-    end
-
     // ---------- MMU ↔ bus (post-translation, physical addresses) ----------
     logic        if_req_valid, if_req_ready;
     logic [31:0] if_req_addr;
@@ -340,10 +293,10 @@ module soc_top #(
         .if_ds_rsp_valid(if_rsp_valid), .if_ds_rsp_data(if_rsp_data), .if_ds_rsp_fault(if_rsp_fault),
         .if_ds_rsp_ready(if_rsp_ready),
 
-        .dm_core_req_valid(mmu_dm_req_valid), .dm_core_req_addr(mmu_dm_req_addr),
-        .dm_core_req_wen(mmu_dm_req_wen),     .dm_core_req_wdata(mmu_dm_req_wdata),
-        .dm_core_req_wmask(mmu_dm_req_wmask), .dm_core_req_size(mmu_dm_req_size),
-        .dm_core_req_ready(mmu_dm_req_ready),
+        .dm_core_req_valid(core_dm_req_valid), .dm_core_req_addr(core_dm_req_addr),
+        .dm_core_req_wen(core_dm_req_wen),     .dm_core_req_wdata(core_dm_req_wdata),
+        .dm_core_req_wmask(core_dm_req_wmask), .dm_core_req_size(core_dm_req_size),
+        .dm_core_req_ready(core_dm_req_ready),
         .dm_core_rsp_valid(core_dm_rsp_valid), .dm_core_rsp_rdata(core_dm_rsp_rdata),
         .dm_core_rsp_fault(core_dm_rsp_fault), .dm_core_rsp_pagefault(core_dm_rsp_pagefault),
         .dm_core_rsp_ready(core_dm_rsp_ready),
