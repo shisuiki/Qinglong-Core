@@ -1348,8 +1348,8 @@ module core_pipeline #(
     assign retire_wb    = wb_valid_q && !wb_trap_q;
 
 `ifdef RISCV_FORMAL
-    // Live taps from the CSR file consumed by core_pipeline_rvfi.svh.
-    wire [31:0] rvfi_mstatus_now;
+    // Live tap from the CSR file consumed by core_pipeline_rvfi.svh —
+    // the `do_write` enable, gated by csr_en/does_write/!csr_illegal.
     wire        rvfi_csr_active_write;
 `endif
 
@@ -1386,7 +1386,6 @@ module core_pipeline #(
         .pmp_addr_out(mmu_pmp_addr)
 `ifdef RISCV_FORMAL
         ,
-        .mstatus_now(rvfi_mstatus_now),
         .csr_active_write(rvfi_csr_active_write)
 `endif
     );

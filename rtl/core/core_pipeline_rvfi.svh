@@ -279,42 +279,47 @@ assign rvfi_mem_rdata = wb_rvfi_mem_rdata_q;
 assign rvfi_mem_wdata = wb_rvfi_mem_wdata_q;
 
 // -----------------------------------------------------------------------------
-// CSR retirement view — MSTATUS (proof-of-concept for the csrw/csr_ill checks)
+// CSR retirement view (drives rvfi_csr_<NAME>_{rmask,wmask,rdata,wdata})
 // -----------------------------------------------------------------------------
-// The CSR file lives at WB and reads/writes happen on the same cycle that
-// surfaces the rvfi_valid pulse for this insn. We compute rmask/wmask/
-// rdata/wdata combinationally from the WB-stage CSR signals plus the
-// pre-edge mstatus storage exposed by csr.sv.
+// The CSR file lives at WB; reads/writes execute on the same cycle that
+// surfaces rvfi_valid. We compute rmask/wmask/rdata/wdata combinationally
+// from the WB CSR signals plus csr_rdata_w (the live read from csr.sv).
 //
-// IMPORTANT: csrw_check is the "SPEC RW view" check, not the "WARL storage
-// view" check. Lines 163-164 of rvfi_csrw_check.sv require that every bit
-// the user requested in the CSR-* operand land in effective_wdata. WARL
-// bits that the hardware silently dropped don't satisfy that, so we expose
-// rmask=wmask=all-1s and wdata = the value csr_op would compute IF the
-// hardware were a pure RW register. The actual WARL masking that csr.sv
-// applies to mstatus_q storage is verified separately (by directed tests
-// in sim/scripts/regress.sh + sim/cpp/sim_top.cpp WARL probes).
-wire wb_csr_addr_is_mstatus = (wb_csr_addr_q == `CSR_MSTATUS);
+// IMPORTANT: csrw_check is the "SPEC RW view", not the "WARL storage view".
+// Lines 163-164 of rvfi_csrw_check.sv require every bit the user requested
+// to land in effective_wdata. For WARL bits the hardware silently drops,
+// the spec RW view (wmask=all-1s, wdata=raw new_val) satisfies the check;
+// the underlying WARL masking that csr.sv applies to storage is verified
+// by the riscv-tests directed suite.
 wire wb_csr_op_is_csrr_only = (wb_csr_op_q == `F3_CSRRS || wb_csr_op_q == `F3_CSRRC) &&
                               (wb_csr_rs1imm_q == 5'd0);
-wire wb_csr_does_write_view = wb_is_csr_q && !wb_trap_q && !wb_csr_op_is_csrr_only &&
-                              wb_csr_addr_is_mstatus && rvfi_csr_active_write;
-// Even on CSRRW with rd=0 we logically read mstatus_q (to compute the
-// post-edge spec value); set rmask whenever the insn touches MSTATUS.
-wire wb_csr_does_read_view  = wb_is_csr_q && !wb_trap_q && wb_csr_addr_is_mstatus;
+wire wb_csr_can_write       = wb_is_csr_q && !wb_trap_q && !wb_csr_op_is_csrr_only &&
+                              rvfi_csr_active_write;
+wire wb_csr_can_read        = wb_is_csr_q && !wb_trap_q;
 
 // Spec RW view of the new value — uses raw csr_wdata_q with no WARL mask.
+// Sourced from csr_rdata_w which combinationally reflects whichever CSR
+// addr this insn targets.
 logic [31:0] wb_csr_new_val_view;
 always_comb begin
     unique case (wb_csr_op_q)
         `F3_CSRRW, `F3_CSRRWI:   wb_csr_new_val_view = wb_csr_wdata_q;
-        `F3_CSRRS, `F3_CSRRSI:   wb_csr_new_val_view = rvfi_mstatus_now |  wb_csr_wdata_q;
-        `F3_CSRRC, `F3_CSRRCI:   wb_csr_new_val_view = rvfi_mstatus_now & ~wb_csr_wdata_q;
-        default:                 wb_csr_new_val_view = rvfi_mstatus_now;
+        `F3_CSRRS, `F3_CSRRSI:   wb_csr_new_val_view = csr_rdata_w |  wb_csr_wdata_q;
+        `F3_CSRRC, `F3_CSRRCI:   wb_csr_new_val_view = csr_rdata_w & ~wb_csr_wdata_q;
+        default:                 wb_csr_new_val_view = csr_rdata_w;
     endcase
 end
 
-assign rvfi_csr_mstatus_rmask = (rvfi_valid && wb_csr_does_read_view ) ? 32'hFFFF_FFFF        : 32'd0;
-assign rvfi_csr_mstatus_wmask = (rvfi_valid && wb_csr_does_write_view) ? 32'hFFFF_FFFF        : 32'd0;
-assign rvfi_csr_mstatus_rdata = (rvfi_valid && wb_csr_does_read_view ) ? rvfi_mstatus_now     : 32'd0;
-assign rvfi_csr_mstatus_wdata = (rvfi_valid && wb_csr_does_write_view) ? wb_csr_new_val_view  : 32'd0;
+`define RVFI_CSR_TAP(NAME, ADDR) \
+    wire wb_csr_match_``NAME = (wb_csr_addr_q == ADDR); \
+    assign rvfi_csr_``NAME``_rmask = (rvfi_valid && wb_csr_can_read  && wb_csr_match_``NAME) ? 32'hFFFF_FFFF       : 32'd0; \
+    assign rvfi_csr_``NAME``_wmask = (rvfi_valid && wb_csr_can_write && wb_csr_match_``NAME) ? 32'hFFFF_FFFF       : 32'd0; \
+    assign rvfi_csr_``NAME``_rdata = (rvfi_valid && wb_csr_can_read  && wb_csr_match_``NAME) ? csr_rdata_w         : 32'd0; \
+    assign rvfi_csr_``NAME``_wdata = (rvfi_valid && wb_csr_can_write && wb_csr_match_``NAME) ? wb_csr_new_val_view : 32'd0;
+
+`RVFI_CSR_TAP(mstatus,  `CSR_MSTATUS)
+`RVFI_CSR_TAP(mtvec,    `CSR_MTVEC)
+`RVFI_CSR_TAP(mscratch, `CSR_MSCRATCH)
+`RVFI_CSR_TAP(mepc,     `CSR_MEPC)
+`RVFI_CSR_TAP(mcause,   `CSR_MCAUSE)
+`RVFI_CSR_TAP(mtval,    `CSR_MTVAL)
