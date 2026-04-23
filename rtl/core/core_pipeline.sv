@@ -64,6 +64,10 @@ module core_pipeline #(
     input  logic        ext_mei,
     input  logic        ext_sei,
 
+    // CLINT.mtime free-running counter, wired into the CSR file so `rdtime`
+    // reads the real counter without trapping to M-mode.
+    input  logic [63:0] mtime,
+
     // ---- commit trace ----
     output logic        commit_valid,
     output logic [31:0] commit_pc,
@@ -1370,6 +1374,7 @@ module core_pipeline #(
         .retire(retire_wb),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
         .ext_sei(ext_sei),
+        .mtime(mtime),
         .mtvec(mtvec_v), .stvec(stvec_v),
         .mepc_out(mepc_v), .sepc_out(sepc_v),
         .priv_mode(priv_mode_v), .trap_to_s(trap_to_s_v),

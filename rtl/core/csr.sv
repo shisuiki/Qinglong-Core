@@ -47,6 +47,10 @@ module csr (
     input  logic        ext_mei,
     input  logic        ext_sei,   // hardware S-mode external (e.g. PLIC ctx1)
 
+    // CLINT.mtime free-running counter. Drives the unprivileged `time` /
+    // `timeh` CSRs so rdtime doesn't have to trap into OpenSBI.
+    input  logic [63:0] mtime,
+
     // outputs visible to the core
     output logic [31:0] mtvec,
     output logic [31:0] stvec,
@@ -259,6 +263,8 @@ module csr (
             `CSR_CYCLEH:    read_value = mcycle_q[63:32];
             `CSR_INSTRET:   read_value = minstret_q[31:0];
             `CSR_INSTRETH:  read_value = minstret_q[63:32];
+            `CSR_TIME:      read_value = mtime[31:0];
+            `CSR_TIMEH:     read_value = mtime[63:32];
             `CSR_MHARTID:   read_value = MHARTID_CONST;
             `CSR_MVENDORID: read_value = MVENDOR_CONST;
             `CSR_MARCHID:   read_value = MARCH_CONST;

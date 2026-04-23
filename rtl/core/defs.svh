@@ -105,8 +105,10 @@
 `define CSR_MINSTRETH 12'hB82
 // Unprivileged read-only aliases (Zicntr).
 `define CSR_CYCLE     12'hC00
+`define CSR_TIME      12'hC01
 `define CSR_INSTRET   12'hC02
 `define CSR_CYCLEH    12'hC80
+`define CSR_TIMEH     12'hC81
 `define CSR_INSTRETH  12'hC82
 `define CSR_MHARTID   12'hF14
 `define CSR_MVENDORID 12'hF11

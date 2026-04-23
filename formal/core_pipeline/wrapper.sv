@@ -97,6 +97,7 @@ module rvfi_wrapper (
 
         .ext_mti (ext_mti), .ext_msi (ext_msi), .ext_mei (ext_mei),
         .ext_sei (ext_sei),
+        .mtime   (64'd0),
 
         .commit_valid    (commit_valid),
         .commit_pc       (commit_pc),

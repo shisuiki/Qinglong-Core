@@ -29,8 +29,17 @@ module clint (
     output logic        rsp_fault,
 
     output logic        mti,
-    output logic        msi
+    output logic        msi,
+
+    // Core-visible mtime snapshot. Wired up to the core's CSR file so that
+    // unprivileged `rdtime` / `rdtimeh` can read CLINT.mtime without taking
+    // an M-mode trap and bouncing through OpenSBI (the kernel's
+    // riscv_clocksource_rdtime is on the hot path).
+    output logic [63:0] mtime_out
 );
+
+    assign mtime_out = mtime_q;
+
 
     localparam logic [15:0] OFF_MSIP    = 16'h0000;
     localparam logic [15:0] OFF_TCMP_LO = 16'h4000;

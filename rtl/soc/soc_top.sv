@@ -212,6 +212,7 @@ module soc_top #(
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
         .ext_sei(ext_sei),
+        .mtime(clint_mtime),
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
@@ -248,6 +249,7 @@ module soc_top #(
 
         .ext_mti(clint_mti), .ext_msi(clint_msi), .ext_mei(ext_mei),
         .ext_sei(ext_sei),
+        .mtime(clint_mtime),
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
@@ -686,13 +688,15 @@ module soc_top #(
     );
 
     // ---------- CLINT ----------
+    logic [63:0] clint_mtime;
     clint u_clint (
         .clk(clk), .rst(rst),
         .req_valid(clint_req_valid), .req_addr(clint_req_addr), .req_wen(clint_req_wen),
         .req_wdata(clint_req_wdata), .req_wmask(clint_req_wmask),
         .req_ready(clint_req_ready),
         .rsp_valid(clint_rsp_valid), .rsp_rdata(clint_rsp_rdata), .rsp_fault(clint_rsp_fault),
-        .mti(clint_mti), .msi(clint_msi)
+        .mti(clint_mti), .msi(clint_msi),
+        .mtime_out(clint_mtime)
     );
 
     // ---------- PLIC (Stage 7d) ----------
