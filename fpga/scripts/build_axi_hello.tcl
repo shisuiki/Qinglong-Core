@@ -71,12 +71,12 @@ puts "==> build_axi_hello: mig_prj    = $mig_prj_file"
 set_part $part
 
 # -----------------------------------------------------------------------------
-# axi_uartlite — 115200 8N1 on soc_clk (50 MHz).
+# axi_uartlite — 115200 8N1 on soc_clk (40 MHz).
 # -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:axi_uartlite:2.0 -module_name axi_uartlite_0 -dir $ip_dir
 set_property -dict [list \
     CONFIG.C_BAUDRATE           {115200} \
-    CONFIG.C_S_AXI_ACLK_FREQ_HZ {50000000} \
+    CONFIG.C_S_AXI_ACLK_FREQ_HZ {40000000} \
     CONFIG.C_DATA_BITS          {8} \
     CONFIG.C_USE_PARITY         {0} \
     CONFIG.C_ODD_PARITY         {0} \
@@ -146,7 +146,7 @@ generate_target {synthesis simulation} [get_ips axi_protocol_converter_0]
 synth_ip [get_ips axi_protocol_converter_0]
 
 # -----------------------------------------------------------------------------
-# axi_clock_converter — crosses xbar M00 (soc_clk, 50 MHz) → MIG s_axi
+# axi_clock_converter — crosses xbar M00 (soc_clk, 40 MHz) → MIG s_axi
 # (ui_clk, ~166.7 MHz). AXI4-full, 32-bit data, 27-bit addr to match MIG, ID=0
 # because the crossbar drops IDs (NUM_SI=1).
 # -----------------------------------------------------------------------------

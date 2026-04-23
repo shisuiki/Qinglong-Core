@@ -137,7 +137,7 @@ module axi_hello_top #(
         .CLKOUT1_DIVIDE    (5),         // 1000 / 5   = 200 MHz (IDELAYCTRL)
         .CLKOUT1_PHASE     (0.000),
         .CLKOUT1_DUTY_CYCLE(0.500),
-        .CLKOUT2_DIVIDE    (20),        // 1000 / 20  = 50  MHz (soc_clk)
+        .CLKOUT2_DIVIDE    (25),        // 1000 / 25  = 40  MHz (soc_clk)
         .CLKOUT2_PHASE     (0.000),
         .CLKOUT2_DUTY_CYCLE(0.500),
         .REF_JITTER1       (0.010),
