@@ -74,6 +74,14 @@ module csr (
     // / pmp_addr_out[i] the same way an unpacked array would be.
     output logic [15:0][7:0]  pmp_cfg_out,
     output logic [15:0][31:0] pmp_addr_out
+`ifdef RISCV_FORMAL
+    ,
+    // Live CSR storage taps for RVFI. Pre-edge values; the tap captures
+    // them at WB time when the CSR insn fires, then computes wdata from
+    // the writable mask defined in this module.
+    output logic [31:0] mstatus_now,
+    output logic        csr_active_write
+`endif
 );
 
     // ------------- CSR storage -------------
@@ -340,6 +348,13 @@ module csr (
 
     // ------------- write logic -------------
     wire do_write = csr_en && does_write && !csr_illegal;
+
+`ifdef RISCV_FORMAL
+    // Live taps for the core's RVFI tap. These avoid having the tap
+    // duplicate WARL/illegal logic that's the source of truth here.
+    assign mstatus_now      = mstatus_q;
+    assign csr_active_write = do_write;
+`endif
 
     // Writable bit masks.
     // mstatus: MIE(3) MPIE(7) MPP(12:11) | SIE(1) SPIE(5) SPP(8) | SUM(18)

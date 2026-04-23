@@ -529,6 +529,11 @@ module core_pipeline #(
                 default:                csr_writes = 1'b0;
             endcase
             if (id_csr_addr[11:10] == 2'b11 && csr_writes) id_illegal = 1'b1;
+            // Privilege check: csr_addr[9:8] is the minimum priv to access.
+            // priv_mode_v < that ⇒ illegal-instruction. csr.sv enforces this
+            // internally to suppress the write, but we additionally need the
+            // pipeline to TRAP rather than silently nop.
+            if (priv_mode_v < id_csr_addr[9:8]) id_illegal = 1'b1;
             // Non-implemented CSR addresses → illegal. Check against the CSR map.
             unique case (id_csr_addr)
                 `CSR_MSTATUS, `CSR_MISA, `CSR_MIE, `CSR_MIP,
@@ -1342,6 +1347,12 @@ module core_pipeline #(
     assign sret_wb      = wb_valid_q && wb_is_sret_q && !wb_trap_q;
     assign retire_wb    = wb_valid_q && !wb_trap_q;
 
+`ifdef RISCV_FORMAL
+    // Live taps from the CSR file consumed by core_pipeline_rvfi.svh.
+    wire [31:0] rvfi_mstatus_now;
+    wire        rvfi_csr_active_write;
+`endif
+
     csr u_csr (
         .clk(clk), .rst(rst),
         .csr_en(csr_en_wb),
@@ -1373,6 +1384,11 @@ module core_pipeline #(
         .irq_cause(irq_cause_v),
         .pmp_cfg_out(mmu_pmp_cfg),
         .pmp_addr_out(mmu_pmp_addr)
+`ifdef RISCV_FORMAL
+        ,
+        .mstatus_now(rvfi_mstatus_now),
+        .csr_active_write(rvfi_csr_active_write)
+`endif
     );
 
 `ifdef DEBUG_PIPE

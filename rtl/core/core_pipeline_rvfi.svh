@@ -249,7 +249,13 @@ assign rvfi_insn      = rvfi_fetch_trap ? 32'd0 : wb_instr_q;
 assign rvfi_trap      = wb_trap_q && !wb_cause_q[31];
 assign rvfi_halt      = 1'b0;
 assign rvfi_intr      = rvfi_intr_pending_q;
-assign rvfi_mode      = 2'b11;
+// rvfi_mode reflects the priv mode the *retiring* insn executed in. We use
+// priv_mode_v (the post-CSR-update view) — for non-CSR insns this is the same
+// as the pre-edge value; for traps/MRET/SRET that change priv mid-cycle, the
+// insn that triggered the change is the one in WB now, so its execution priv
+// is the OLD value. csr.sv updates priv_mode_q on the next clk edge, so
+// priv_mode_v this cycle still IS the OLD value. Good for our purposes.
+assign rvfi_mode      = priv_mode_v;
 assign rvfi_ixl       = 2'b01;
 
 assign rvfi_rs1_addr  = wb_rvfi_rs1_addr_q;
@@ -271,3 +277,44 @@ assign rvfi_mem_rmask = wb_trap_q ? 4'd0 : wb_rvfi_mem_rmask_q;
 assign rvfi_mem_wmask = wb_trap_q ? 4'd0 : wb_rvfi_mem_wmask_q;
 assign rvfi_mem_rdata = wb_rvfi_mem_rdata_q;
 assign rvfi_mem_wdata = wb_rvfi_mem_wdata_q;
+
+// -----------------------------------------------------------------------------
+// CSR retirement view — MSTATUS (proof-of-concept for the csrw/csr_ill checks)
+// -----------------------------------------------------------------------------
+// The CSR file lives at WB and reads/writes happen on the same cycle that
+// surfaces the rvfi_valid pulse for this insn. We compute rmask/wmask/
+// rdata/wdata combinationally from the WB-stage CSR signals plus the
+// pre-edge mstatus storage exposed by csr.sv.
+//
+// IMPORTANT: csrw_check is the "SPEC RW view" check, not the "WARL storage
+// view" check. Lines 163-164 of rvfi_csrw_check.sv require that every bit
+// the user requested in the CSR-* operand land in effective_wdata. WARL
+// bits that the hardware silently dropped don't satisfy that, so we expose
+// rmask=wmask=all-1s and wdata = the value csr_op would compute IF the
+// hardware were a pure RW register. The actual WARL masking that csr.sv
+// applies to mstatus_q storage is verified separately (by directed tests
+// in sim/scripts/regress.sh + sim/cpp/sim_top.cpp WARL probes).
+wire wb_csr_addr_is_mstatus = (wb_csr_addr_q == `CSR_MSTATUS);
+wire wb_csr_op_is_csrr_only = (wb_csr_op_q == `F3_CSRRS || wb_csr_op_q == `F3_CSRRC) &&
+                              (wb_csr_rs1imm_q == 5'd0);
+wire wb_csr_does_write_view = wb_is_csr_q && !wb_trap_q && !wb_csr_op_is_csrr_only &&
+                              wb_csr_addr_is_mstatus && rvfi_csr_active_write;
+// Even on CSRRW with rd=0 we logically read mstatus_q (to compute the
+// post-edge spec value); set rmask whenever the insn touches MSTATUS.
+wire wb_csr_does_read_view  = wb_is_csr_q && !wb_trap_q && wb_csr_addr_is_mstatus;
+
+// Spec RW view of the new value — uses raw csr_wdata_q with no WARL mask.
+logic [31:0] wb_csr_new_val_view;
+always_comb begin
+    unique case (wb_csr_op_q)
+        `F3_CSRRW, `F3_CSRRWI:   wb_csr_new_val_view = wb_csr_wdata_q;
+        `F3_CSRRS, `F3_CSRRSI:   wb_csr_new_val_view = rvfi_mstatus_now |  wb_csr_wdata_q;
+        `F3_CSRRC, `F3_CSRRCI:   wb_csr_new_val_view = rvfi_mstatus_now & ~wb_csr_wdata_q;
+        default:                 wb_csr_new_val_view = rvfi_mstatus_now;
+    endcase
+end
+
+assign rvfi_csr_mstatus_rmask = (rvfi_valid && wb_csr_does_read_view ) ? 32'hFFFF_FFFF        : 32'd0;
+assign rvfi_csr_mstatus_wmask = (rvfi_valid && wb_csr_does_write_view) ? 32'hFFFF_FFFF        : 32'd0;
+assign rvfi_csr_mstatus_rdata = (rvfi_valid && wb_csr_does_read_view ) ? rvfi_mstatus_now     : 32'd0;
+assign rvfi_csr_mstatus_wdata = (rvfi_valid && wb_csr_does_write_view) ? wb_csr_new_val_view  : 32'd0;
