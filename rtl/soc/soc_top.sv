@@ -105,7 +105,8 @@ module soc_top #(
     output logic        tap_dm_rsp_fire,
     output logic [31:0] tap_dm_rsp_rdata,
     output logic        tap_dm_rsp_fault,
-    output logic        tap_dm_rsp_pagefault
+    output logic        tap_dm_rsp_pagefault,
+    output logic [1:0]  tap_priv_mode
 );
 
     assign tap_dm_req_fire     = dm_req_valid     && dm_req_ready;
@@ -119,6 +120,7 @@ module soc_top #(
     assign tap_dm_rsp_rdata    = dm_rsp_rdata;
     assign tap_dm_rsp_fault    = dm_rsp_fault;
     assign tap_dm_rsp_pagefault = core_dm_rsp_pagefault;
+    assign tap_priv_mode         = mmu_priv_w;
 
     // ---------- core ↔ MMU (pre-translation) ----------
     logic        core_if_req_valid, core_if_req_ready;

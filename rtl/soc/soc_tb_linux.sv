@@ -35,7 +35,8 @@ module soc_tb_linux (
     output logic        tap_dm_rsp_fire,
     output logic [31:0] tap_dm_rsp_rdata,
     output logic        tap_dm_rsp_fault,
-    output logic        tap_dm_rsp_pagefault
+    output logic        tap_dm_rsp_pagefault,
+    output logic [1:0]  tap_priv_mode
 );
 
     // ---------- AXI4 master out of soc_top ----------
@@ -118,7 +119,8 @@ module soc_tb_linux (
         .tap_dm_rsp_fire(tap_dm_rsp_fire),
         .tap_dm_rsp_rdata(tap_dm_rsp_rdata),
         .tap_dm_rsp_fault(tap_dm_rsp_fault),
-        .tap_dm_rsp_pagefault(tap_dm_rsp_pagefault)
+        .tap_dm_rsp_pagefault(tap_dm_rsp_pagefault),
+        .tap_priv_mode(tap_priv_mode)
     );
 
     // ---------- AXI4 router → DDR + UartLite ----------

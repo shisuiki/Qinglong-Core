@@ -275,6 +275,9 @@ int main(int argc, char** argv) {
 
     int exit_code = -1;
     bool done = false;
+    uint8_t prev_priv = 3;   // M-mode after reset
+    uint64_t traps_seen = 0;
+    static const char* const PRIV_NAMES[4] = {"U", "S", "?", "M"};
 
     while (!done && g_cycles < timeout) {
         top->clk = 1;
@@ -351,10 +354,34 @@ int main(int argc, char** argv) {
             done = true;
         }
 
-        // Progress heartbeat (helps notice an infinite loop without a trace).
-        if ((g_cycles & 0xFFFFF) == 0 && g_cycles != 0) {
-            std::fprintf(stderr, "[sim] cycle %llu, last PC 0x%08x\n",
-                         (unsigned long long)g_cycles, top->commit_pc);
+        // Always-on trap print (cheap and always useful).
+        if (top->commit_valid && top->commit_trap) {
+            traps_seen++;
+            if (traps_seen <= 64 || (traps_seen & 0xFFFF) == 0) {
+                std::fprintf(stderr, "[sim] TRAP @ cycle %llu pc=0x%08x cause=0x%08x (priv=%s)\n",
+                             (unsigned long long)g_cycles, top->commit_pc,
+                             top->commit_cause, PRIV_NAMES[top->tap_priv_mode & 3]);
+            }
+        }
+
+        // Priv-mode transitions — M↔S↔U boundaries are the interesting ones.
+        {
+            uint8_t cur_priv = top->tap_priv_mode & 3;
+            if (cur_priv != prev_priv) {
+                std::fprintf(stderr, "[sim] PRIV %s->%s @ cycle %llu pc=0x%08x\n",
+                             PRIV_NAMES[prev_priv], PRIV_NAMES[cur_priv],
+                             (unsigned long long)g_cycles, top->commit_pc);
+                prev_priv = cur_priv;
+            }
+        }
+
+        // Progress heartbeat: coarse so long runs (~10B cycles) aren't noisy.
+        // ~67M cycles = every 1–2 minutes wall-clock on this sim host.
+        if ((g_cycles & 0x3FFFFFF) == 0 && g_cycles != 0) {
+            std::fprintf(stderr, "[sim] cycle %llu, last PC 0x%08x priv=%s traps=%llu\n",
+                         (unsigned long long)g_cycles, top->commit_pc,
+                         PRIV_NAMES[top->tap_priv_mode & 3],
+                         (unsigned long long)traps_seen);
         }
     }
 
