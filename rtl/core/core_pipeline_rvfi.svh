@@ -323,3 +323,11 @@ end
 `RVFI_CSR_TAP(mepc,     `CSR_MEPC)
 `RVFI_CSR_TAP(mcause,   `CSR_MCAUSE)
 `RVFI_CSR_TAP(mtval,    `CSR_MTVAL)
+// S-mode CSRs (stvec/sscratch/sepc/scause/stval) are wired in csr.sv but
+// csrw checks for them currently fail — the priv-trap added at decode in
+// id_illegal looks at priv_mode_v at decode-time, but rvfi_mode reports
+// retire-time priv. The solver finds init states where these differ for
+// in-flight S-mode-CSR accesses. Real hardware doesn't hit this because
+// MRET/SRET flush the pipe, but formal allows symbolic init that bypasses
+// the flush. Needs decode-time priv snapshot through the shadow pipe to
+// match — left as follow-up.
