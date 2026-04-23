@@ -246,7 +246,7 @@ Not in Stage 4 (deferred): MEI from an external intc, AXI shim, boot ROM.
 ### Residuals (tracked, not blocking closure)
 - **Sim residual**: kernel `handle_exception` faults on `sw sp, 12(tp)` — `sscratch` appears to hold a user VA on kernel entry. Next: targeted `[SSCRATCH]` trace. See task #109.
 - **Silicon residual (#102)**: kernel boots ran on the pre-fix bitstream — needs a rebuild carrying the full set of accumulated RTL fixes (MIP split / PTW-DDR / axi4 fetch race / if_bad one-pulse / fetch_squash).
-- **Formal residual (#115)**: csr/csrw/csr_ill checks still off — needs the RVFI CSR port tap.
+- **Formal (#115 closed 2026-04-23)**: M-mode csrw (mstatus/mtvec/mscratch/mepc/mcause/mtval) + csr_ill checks live, 50/50 PASS at depth 20. S-mode CSR taps deferred to #119 (decode-vs-retire priv mismatch — needs decode-time priv snapshot through shadow pipe).
 
 ## Open questions
 
