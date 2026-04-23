@@ -286,7 +286,12 @@ module core_pipeline #(
     // IF stage
     // ========================================================================
     wire if_id_slot_free_next = !id_valid_q || !stall_id;
-    wire allow_irq_inject =  irq_pending_v && !ex_valid_q && !mem_valid_q && !wb_valid_q && !fetch_inflight_q && !trap_pending_q;
+    // IRQ inject: fire when nothing is in EX/MEM/WB, no fetch is in flight,
+    // and no IRQ bubble is already in ID. id_valid_q can be 1 (a real instr
+    // currently sitting in ID) — we'll kick that instr out via id_will_bubble
+    // and capture its PC as mepc (so kernel re-executes it on return).
+    wire allow_irq_inject =  irq_pending_v && !ex_valid_q && !mem_valid_q && !wb_valid_q &&
+                             !fetch_inflight_q && !trap_pending_q && !id_irq_q;
     wire if_can_issue = !fetch_inflight_q && if_id_slot_free_next &&
                         !branch_redirect && !wb_redirect &&
                         !trap_pending_q && !allow_irq_inject;
@@ -357,7 +362,12 @@ module core_pipeline #(
             // rsp — the stall only forbids ID→EX advance, not IF→ID fill.
             if (allow_irq_inject) begin
                 id_valid_d     = 1'b1;
-                id_pc_d        = pc_q;
+                // Capture the PC of the instruction the IRQ pre-empts. If ID
+                // already holds a real instr (id_valid_q=1), use its PC — that
+                // instr is being kicked out (id_will_bubble forces a bubble
+                // into EX), so kernel must re-execute it on mret return. If ID
+                // is empty, use pc_q (next-to-fetch PC).
+                id_pc_d        = id_valid_q ? id_pc_q : pc_q;
                 // Use all-zero encoding (not 0x13/NOP): 0 has opcode=0 which
                 // doesn't match any legal insn, so riscv-formal's insn checks
                 // see spec_valid=0 and skip the retirement — as they should,
@@ -609,7 +619,12 @@ module core_pipeline #(
     // ID → ID/EX — build next-cycle payload (or bubble when flushed/stalled)
     // ========================================================================
     logic id_will_bubble;
-    assign id_will_bubble = flush_ex || !id_valid_q || stall_id;
+    // Force ID→EX to bubble when the IRQ inject is going to overwrite a real
+    // (non-IRQ) instruction in ID this cycle. Without this, the in-flight ID
+    // instr would advance to EX and commit its side effects, then the kernel
+    // would re-execute it on mret return — doubling the side effect.
+    assign id_will_bubble = flush_ex || !id_valid_q || stall_id ||
+                            (allow_irq_inject && id_valid_q && !id_irq_q);
 
     always_comb begin
         // Hold by default
