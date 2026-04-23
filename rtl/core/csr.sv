@@ -45,6 +45,7 @@ module csr (
     input  logic        ext_mti,
     input  logic        ext_msi,
     input  logic        ext_mei,
+    input  logic        ext_sei,   // hardware S-mode external (e.g. PLIC ctx1)
 
     // outputs visible to the core
     output logic [31:0] mtvec,
@@ -175,6 +176,10 @@ module csr (
         mip_live[`MIP_MSI_BIT] = ext_msi;
         mip_live[`MIP_MTI_BIT] = ext_mti;
         mip_live[`MIP_MEI_BIT] = ext_mei;
+        // SEIP is the OR of software-set (via mip write) and hardware ext_sei.
+        // Reading sip observes the combined value; clearing software-set side
+        // via sip write cannot clear the hardware-driven half until PLIC claim.
+        mip_live[`MIP_SEI_BIT] = mip_sw_q[`MIP_SEI_BIT] | ext_sei;
     end
 
     // ------------- interrupt evaluation -------------
@@ -344,7 +349,14 @@ module csr (
     // mie / mip writable bit masks. mip: only SSIP is writable (software
     // interrupt pending at S-level).
     localparam logic [31:0] MIE_WRITABLE = 32'h0000_0AAA;
-    localparam logic [31:0] MIP_WRITABLE = 32'h0000_0002; // SSIP only
+    // mip: M-mode can software-set SSIP (bit 1), STIP (bit 5), SEIP (bit 9) —
+    // OpenSBI's timer-trap fwd uses `csrrs mip, STIP` to raise the S-mode
+    // timer IRQ after catching MTIP. SSIP is also the S-mode write side.
+    // MTIP/MSIP/MEIP stay read-only (driven by ext_* from CLINT/PLIC).
+    localparam logic [31:0] MIP_M_WRITABLE = 32'h0000_0222;
+    // sip (S-mode view): only SSIP is truly software-writable at S-level.
+    // STIP/SEIP appear RO to S-mode.
+    localparam logic [31:0] MIP_S_WRITABLE = 32'h0000_0002;
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -379,6 +391,12 @@ module csr (
 
             // Trap entry beats an instruction's CSR write this cycle.
             if (trap_take) begin
+`ifdef VERILATOR
+                if (trace_dbg_en)
+                    $display("[TRAP] t=%0t cause=%08x pc=%08x tval=%08x from_priv=%0d to_s=%0d mip=%08x mie=%08x mstatus=%08x mtvec=%08x mepc=%08x",
+                        $time, trap_cause, trap_pc, trap_tval, priv_mode_q, trap_to_s,
+                        mip_live, mie_q, mstatus_q, mtvec_q, mepc_q);
+`endif
                 // Decide delegation target. `trap_to_s` is visible to the
                 // core so wb_redirect_pc picks the right vector. We consider
                 // delegation only when coming from S or U (never delegate to
@@ -427,10 +445,17 @@ module csr (
                     `CSR_MIDELEG:   mideleg_q  <= new_val & 32'h0000_0222; // SSI/STI/SEI
                     `CSR_MIE:       mie_q      <= (mie_q     & ~MIE_WRITABLE) |
                                                   (new_val   &  MIE_WRITABLE);
-                    `CSR_MIP:       mip_sw_q   <= (mip_sw_q  & ~MIP_WRITABLE) |
-                                                  (new_val   &  MIP_WRITABLE);
+                    `CSR_MIP:       mip_sw_q   <= (mip_sw_q  & ~MIP_M_WRITABLE) |
+                                                  (new_val   &  MIP_M_WRITABLE);
                     `CSR_MTVEC:     mtvec_q    <= {new_val[31:2], 1'b0, new_val[0]};
-                    `CSR_MSCRATCH:  mscratch_q <= new_val;
+                    `CSR_MSCRATCH:  begin
+                                    mscratch_q <= new_val;
+`ifdef VERILATOR
+                                    if (trace_dbg_en)
+                                        $display("[MSCRATCH] t=%0t old=%08x new=%08x priv=%0d csr_addr=%03x",
+                                            $time, mscratch_q, new_val, priv_mode_q, csr_addr);
+`endif
+                                    end
                     `CSR_MEPC:      mepc_q     <= {new_val[31:2], 2'b00};
                     `CSR_MCAUSE:    mcause_q   <= new_val;
                     `CSR_MTVAL:     mtval_q    <= new_val;
@@ -443,10 +468,17 @@ module csr (
                                                   (new_val   &  `SSTATUS_MASK);
                     `CSR_SIE:       mie_q      <= (mie_q     & ~mideleg_q) |
                                                   (new_val   &  mideleg_q & MIE_WRITABLE);
-                    `CSR_SIP:       mip_sw_q   <= (mip_sw_q  & ~MIP_WRITABLE) |
-                                                  (new_val   &  MIP_WRITABLE & mideleg_q);
+                    `CSR_SIP:       mip_sw_q   <= (mip_sw_q  & ~MIP_S_WRITABLE) |
+                                                  (new_val   &  MIP_S_WRITABLE & mideleg_q);
                     `CSR_STVEC:     stvec_q    <= {new_val[31:2], 1'b0, new_val[0]};
-                    `CSR_SSCRATCH:  sscratch_q <= new_val;
+                    `CSR_SSCRATCH:  begin
+                                    sscratch_q <= new_val;
+`ifdef VERILATOR
+                                    if (trace_dbg_en)
+                                        $display("[SSCRATCH] t=%0t old=%08x new=%08x priv=%0d csr_addr=%03x",
+                                            $time, sscratch_q, new_val, priv_mode_q, csr_addr);
+`endif
+                                    end
                     `CSR_SEPC:      sepc_q     <= {new_val[31:2], 2'b00};
                     `CSR_SCAUSE:    scause_q   <= new_val;
                     `CSR_STVAL:     stval_q    <= new_val;
@@ -490,5 +522,14 @@ module csr (
     assign trap_to_s = trap_take
                        && (priv_mode_q != `PRV_M)
                        && delegated_w;
+
+`ifdef VERILATOR
+    // Debug $display traces ([TRAP]/[MSCRATCH]/[SSCRATCH]) are off by default.
+    // Enable with `+trace_dbg` on the sim command line.
+    bit trace_dbg_en = 1'b0;
+    initial begin
+        if ($test$plusargs("trace_dbg")) trace_dbg_en = 1'b1;
+    end
+`endif
 
 endmodule

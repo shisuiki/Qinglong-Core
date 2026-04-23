@@ -1,0 +1,96 @@
+/dts-v1/;
+
+/ {
+    #address-cells = <1>;
+    #size-cells    = <1>;
+    compatible     = "riscv-soc,urbana";
+    model          = "RealDigital Urbana RV32IMA SoC";
+
+    chosen {
+        bootargs       = "console=ttyUL0,115200 earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug";
+        stdout-path    = "/soc/serial@c0000000";
+        /* rootfs.cpio (uncompressed, ~20 MB) staged at 0x43000000; DDR
+         * ends at 0x48000000 so cover the full uncompressed range. */
+        linux,initrd-start = <0x43000000>;
+        linux,initrd-end   = <0x44500000>;
+    };
+
+    aliases {
+        serial0 = &uart0;
+    };
+
+    cpus {
+        #address-cells     = <1>;
+        #size-cells        = <0>;
+        timebase-frequency = <50000000>;    /* CLINT.mtime ticks at soc_clk = 50 MHz */
+
+        cpu@0 {
+            device_type   = "cpu";
+            reg           = <0>;
+            compatible    = "riscv";
+            riscv,isa     = "rv32ima_zicsr_zifencei";
+            mmu-type      = "riscv,sv32";
+            clock-frequency = <50000000>;
+            status        = "okay";
+
+            cpu0_intc: interrupt-controller {
+                #interrupt-cells   = <1>;
+                interrupt-controller;
+                compatible         = "riscv,cpu-intc";
+            };
+        };
+    };
+
+    memory@40000000 {
+        device_type = "memory";
+        reg         = <0x40000000 0x08000000>;   /* 128 MB DDR3L */
+    };
+
+    /* Reserve bottom of DDR for OpenSBI fw_jump.  fw_jump default is 2 MiB.  */
+    reserved-memory {
+        #address-cells = <1>;
+        #size-cells    = <1>;
+        ranges;
+
+        fw@40000000 {
+            reg           = <0x40000000 0x00200000>;
+            no-map;
+        };
+    };
+
+    soc {
+        #address-cells = <1>;
+        #size-cells    = <1>;
+        compatible     = "simple-bus";
+        ranges;
+
+        clint@2000000 {
+            compatible     = "sifive,clint0", "riscv,clint0";
+            reg            = <0x02000000 0x10000>;
+            interrupts-extended = <&cpu0_intc 3    /* MSI */
+                                   &cpu0_intc 7>;  /* MTI */
+        };
+
+        plic: interrupt-controller@c000000 {
+            compatible          = "sifive,plic-1.0.0", "riscv,plic0";
+            reg                 = <0x0c000000 0x400000>;
+            #interrupt-cells    = <1>;
+            #address-cells      = <0>;
+            interrupt-controller;
+            interrupts-extended = <&cpu0_intc 11   /* M-ext ctx 0 */
+                                   &cpu0_intc 9>;  /* S-ext ctx 1 */
+            riscv,ndev          = <3>;             /* sources 1..3 usable */
+        };
+
+        uart0: serial@c0000000 {
+            compatible       = "xlnx,xps-uartlite-1.00.a";
+            reg              = <0xc0000000 0x1000>;
+            interrupt-parent = <&plic>;
+            interrupts       = <1>;
+            clock-frequency  = <50000000>;
+            current-speed    = <115200>;
+            xlnx,data-bits   = <8>;
+            xlnx,use-parity  = <0>;
+        };
+    };
+};

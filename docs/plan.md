@@ -190,6 +190,64 @@ Not in Stage 4 (deferred): MEI from an external intc, AXI shim, boot ROM.
 - `sim/scripts/regress.sh` default `FAMILIES` now includes `rv32um rv32ua`.
 - Board UART capture remains deferred (Stage 5/6 AXI UartLite).
 
+## Stage 5 deliverables (5-stage pipeline + AXI-Lite + FreeRTOS)
+
+1. `rtl/core/core_pipeline.sv` — classic 5-stage IF/ID/EX/MEM/WB with full forwarding, load-use hazard stall, and branch flush. Selectable via `CORE=pipeline` in Makefiles.
+2. AXI4-Lite external bus; `axi_uartlite` on silicon (Urbana); FreeRTOS demo target.
+3. Stage 5E: atomic extension in the pipeline (LR.W/SC.W/AMO*.W) matching the multicycle semantics.
+4. Stage 5G: FPGA synth flow picks up `CORE=pipeline` end-to-end.
+
+## Stage 5 status (closed 2026-04-16)
+- Pipeline closes at 50 MHz on Urbana; same regression coverage as multicycle (74/76 passing).
+- FreeRTOS "two-tasks + heartbeat-LED" demo runs on silicon.
+
+## Stage FV deliverables (formal)
+
+1. `third_party/riscv-formal` vendored as submodule; RVFI tap on `core_pipeline.sv`.
+2. `rtl/core/core_pipeline_rvfi.svh` — RVFI signal tap.
+3. `formal/core_pipeline/` — wrapper + suites for reg_ch0, pc_fwd_ch0, causal_ch0, trap_ch0, insn_*.
+4. Sync/async trap split + `rvfi_insn` sanitization on fetch faults.
+
+## Stage FV status (closed 2026-04-20)
+- FV-1/2/3/4 committed. 37/37 insn PASS; reg_ch0 PASS @ depth 20.
+- Post-close fix in working tree: trap signal split + ifetch-fault `rvfi_insn` sanitization (40/40 with ifetch faults + IRQs symbolic). See task #113, #114.
+
+## Stage 6 deliverables (caches + privileged)
+
+1. Stage 6A: I-cache (4-way, 64 B lines, 16 KiB) + `FENCE.I`.
+2. Stage 6B: D-cache (write-through, 4-way, 64 B lines, 16 KiB).
+3. Stage 6C-1: S/U priv modes, S-mode CSRs (stvec/sepc/scause/stval/sscratch/satp), trap delegation, SRET.
+4. Stage 6C-2: SV32 MMU skeleton → PTW FSM → TLB + SFENCE.VMA → page-fault cause distinction → ifetch-side translation.
+5. Stage 6C-3: PMP (CSR storage + enforce + lock-bit WARL + Yosys/SBY-friendly port shape + IRQ-bubble RVFI fix).
+6. Stage 6C-4/5: TVM/TSR + IRQ-priority, S-mode interrupt delegation + multicycle SRET, medeleg test.
+7. Stage 6C-6/7/8/9: ASID + global-bit TLB, SFENCE.VMA rs1/rs2 selective flush, MXR/SUM semantics, U-mode MMU integration test.
+
+## Stage 6 status (closed 2026-04-19)
+- All of the above committed. Caches on FPGA build flow too (Stage 6A/6B prep).
+- Regression stable at 79/82 rv32ui/um/ua/mi/si; 3 residuals (ma_data, breakpoint, rv32si-p-dirty) parked.
+
+## Stage 7 deliverables (DDR + Linux bring-up)
+
+1. Stage 7a: AXI4-full bus refactor (prep for MIG/DDR).
+2. Stage 7b: MIG7 DDR3L bitstream closes (WNS = −0.309 ns) + memtest PASS on silicon.
+3. Stage 7c: Verilator Linux sim harness (`soc_tb_linux`, DDR DPI backdoor, `axi4_router_linux`, `axil_bram_big`, `sim_linux.cpp`).
+4. Stage 7d: PLIC (`rtl/soc/plic.sv`) — 32-source priority-based, M+S contexts, memory-mapped at 0x0C000000.
+5. Stage 7e: No-SD-card boot strategy — JTAG loader (`jtag_load.tcl`) + bootrom + handshake at 0x47000000. `axi_crossbar` / `jtag_axi` IP reconfigured to NUM_SI=2 so JTAG and SoC can both access DDR.
+6. Stage 7f: OpenSBI 1.4 port — `fw_jump`, FW_TEXT_START=0x40000000, FW_JUMP_ADDR=0x40400000, FW_JUMP_FDT_ADDR=0x42200000, `rv32ima_zicsr_zifencei ilp32` (non-RVC).
+7. Stage 7g: rv32 Linux 6.6.32 kernel + DT (`sw/linux/riscv_soc.dts`) + buildroot initramfs; sim boot + silicon boot.
+
+## Stage 7 status (in progress)
+
+### Closed
+- 7a, 7b, 7c, 7d, 7e, 7f committed / staged.
+- Silicon: BootROM → OpenSBI handshake works; DDR load via JTAG works; OpenSBI banner observed.
+- Sim: full boot chain functional; kernel reaches `/sbin/init` and runs for ~150 ms before a residual trap-entry fault.
+
+### Residuals (tracked, not blocking closure)
+- **Sim residual**: kernel `handle_exception` faults on `sw sp, 12(tp)` — `sscratch` appears to hold a user VA on kernel entry. Next: targeted `[SSCRATCH]` trace. See task #109.
+- **Silicon residual (#102)**: kernel boots ran on the pre-fix bitstream — needs a rebuild carrying the full set of accumulated RTL fixes (MIP split / PTW-DDR / axi4 fetch race / if_bad one-pulse / fetch_squash).
+- **Formal residual (#115)**: csr/csrw/csr_ill checks still off — needs the RVFI CSR port tap.
+
 ## Open questions
 
 - HDMI PHY on SP701 — present or via PMOD add-on? (affects Stage 12 plan). Check UG1479.

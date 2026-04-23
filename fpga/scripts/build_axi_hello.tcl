@@ -37,6 +37,7 @@ set src_list [list \
     [file join $repo_dir rtl cache dcache.sv]         \
     [file join $repo_dir rtl soc   mmio.sv]           \
     [file join $repo_dir rtl soc   clint.sv]          \
+    [file join $repo_dir rtl soc   plic.sv]           \
     [file join $repo_dir rtl soc   axi4_master.sv]    \
     [file join $repo_dir rtl soc   soc_top.sv]        \
     [file join $repo_dir rtl fpga  axi_hello_top.sv]  \
@@ -84,14 +85,16 @@ generate_target {synthesis simulation} [get_ips axi_uartlite_0]
 synth_ip [get_ips axi_uartlite_0]
 
 # -----------------------------------------------------------------------------
-# axi_crossbar — 1 slave (from soc_top, AXI4 full, ID=4) → 2 masters, both
-# AXI4-full.  M01 (UartLite) is downgraded by a downstream axi_protocol_converter.
-#   M00 → MIG  @ 0x4000_0000 / 256 MB
+# axi_crossbar — 2 slaves (S00 = soc_top AXI master, S01 = JTAG-to-AXI master)
+#                2 masters (M00 = MIG, M01 = UartLite).
+# PROTOCOL = AXI4 on both sides; UartLite is downgraded by a downstream
+# axi_protocol_converter on the M01 path.
+#   M00 → MIG  @ 0x4000_0000 / 128 MB
 #   M01 → Uart @ 0xC000_0000 / 4 KB
 # -----------------------------------------------------------------------------
 create_ip -vlnv xilinx.com:ip:axi_crossbar:2.1 -module_name axi_crossbar_0 -dir $ip_dir
 set_property -dict [list \
-    CONFIG.NUM_SI             {1} \
+    CONFIG.NUM_SI             {2} \
     CONFIG.NUM_MI             {2} \
     CONFIG.PROTOCOL           {AXI4} \
     CONFIG.DATA_WIDTH         {32} \
@@ -100,6 +103,7 @@ set_property -dict [list \
     CONFIG.STRATEGY           {1} \
     CONFIG.R_REGISTER         {1} \
     CONFIG.S00_SINGLE_THREAD  {1} \
+    CONFIG.S01_SINGLE_THREAD  {1} \
     CONFIG.M00_A00_BASE_ADDR  {0x0000000040000000} \
     CONFIG.M00_A00_ADDR_WIDTH {27} \
     CONFIG.M01_A00_BASE_ADDR  {0x00000000C0000000} \
@@ -107,6 +111,23 @@ set_property -dict [list \
 ] [get_ips axi_crossbar_0]
 generate_target {synthesis simulation} [get_ips axi_crossbar_0]
 synth_ip [get_ips axi_crossbar_0]
+
+# -----------------------------------------------------------------------------
+# JTAG-to-AXI Master — lets Vivado (or vivado_lab) push 32-bit words into the
+# AXI fabric over JTAG, used to stage OpenSBI + kernel + DTB into DDR before
+# kicking the BootROM. AXI4, 32-bit data, 32-bit addr, ID width matches the
+# crossbar (4). Runs on soc_clk (its BSCAN CDC is internal).
+# -----------------------------------------------------------------------------
+create_ip -vlnv xilinx.com:ip:jtag_axi:1.2 -module_name jtag_axi_0 -dir $ip_dir
+set_property -dict [list \
+    CONFIG.PROTOCOL         {0} \
+    CONFIG.M_AXI_DATA_WIDTH {32} \
+    CONFIG.M_AXI_ADDR_WIDTH {32} \
+    CONFIG.M_AXI_ID_WIDTH   {1} \
+    CONFIG.M_HAS_BURST      {1} \
+] [get_ips jtag_axi_0]
+generate_target {synthesis simulation} [get_ips jtag_axi_0]
+synth_ip [get_ips jtag_axi_0]
 
 # -----------------------------------------------------------------------------
 # axi_protocol_converter — sits between the crossbar's M01 (AXI4) and the
@@ -183,6 +204,7 @@ read_xdc $src_xdc
 
 read_ip [file join $ip_dir axi_uartlite_0           axi_uartlite_0.xci]
 read_ip [file join $ip_dir axi_crossbar_0           axi_crossbar_0.xci]
+read_ip [file join $ip_dir jtag_axi_0               jtag_axi_0.xci]
 read_ip [file join $ip_dir axi_protocol_converter_0 axi_protocol_converter_0.xci]
 read_ip [file join $ip_dir axi_clock_converter_0    axi_clock_converter_0.xci]
 read_ip [file join $ip_dir mig_ddr3_0               mig_ddr3_0.xci]

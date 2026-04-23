@@ -1,0 +1,47 @@
+# Kernel config fragment for the custom rv32ima SoC on Urbana.
+# Applied on top of arch/riscv/configs/rv32_defconfig.
+#
+# Our core is strictly RV32IMA + Zicsr + Zifencei, Sv32, no F, no D, no C, no V,
+# no Zbb/Zicbom/Zicboz. Single hart. No PCI. UartLite console only.
+
+# EFI pulls in RISCV_ISA_C via `select`. We boot via OpenSBI, no EFI needed.
+# CONFIG_EFI is not set
+
+# ISA: disable everything our silicon doesn't implement.
+# CONFIG_RISCV_ISA_C is not set
+# CONFIG_RISCV_ISA_V is not set
+# CONFIG_RISCV_ISA_V_DEFAULT_ENABLE is not set
+# CONFIG_RISCV_ISA_ZBB is not set
+# CONFIG_RISCV_ISA_ZICBOM is not set
+# CONFIG_RISCV_ISA_ZICBOZ is not set
+# CONFIG_FPU is not set
+
+# Single-hart: drop SMP.
+# CONFIG_SMP is not set
+CONFIG_NR_CPUS=1
+
+# No PCIe.
+# CONFIG_PCI is not set
+
+# Only SBI 0.2+ — drop v01.
+# CONFIG_RISCV_SBI_V01 is not set
+# CONFIG_RISCV_SBI_CPUIDLE is not set
+
+# Serial: UartLite @ 0xC0000000 is PLIC source 1.
+CONFIG_SERIAL_UARTLITE=y
+CONFIG_SERIAL_UARTLITE_CONSOLE=y
+CONFIG_SERIAL_EARLYCON_RISCV_SBI=y
+
+# DTB built-in, since we load it from JTAG anyway.
+CONFIG_BUILTIN_DTB=n
+
+# initramfs (keep, buildroot will overlay at runtime via DT initrd-start).
+CONFIG_BLK_DEV_INITRD=y
+
+# Trim things that pull in big kernels.
+# CONFIG_DRM is not set
+# CONFIG_SOUND is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_MMC is not set
+# CONFIG_INFINIBAND is not set
+# CONFIG_NET_VENDOR_ALL is not set

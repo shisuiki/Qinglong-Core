@@ -47,10 +47,11 @@ module core_multicycle #(
     input  logic        dmem_rsp_pagefault,
     output logic        dmem_rsp_ready,
 
-    // ---- external interrupt lines (M-mode) ----
+    // ---- external interrupt lines ----
     input  logic        ext_mti,
     input  logic        ext_msi,
     input  logic        ext_mei,
+    input  logic        ext_sei,
 
     // ---- commit trace ----
     output logic        commit_valid,
@@ -95,6 +96,15 @@ module core_multicycle #(
 
     logic [31:0] pc_q;
     logic [31:0] instr_q;
+    // ifetch in-flight / squash tracker:
+    //   fetch_inflight_q  : a request was accepted (req_valid && req_ready) and
+    //                       its response is still pending.
+    //   fetch_squash_q    : the in-flight request is stale (e.g. a trap redirect
+    //                       changed pc_q out from under it); when its response
+    //                       eventually arrives, drop it instead of latching it
+    //                       as the instruction at the new pc_q.
+    logic        fetch_inflight_q;
+    logic        fetch_squash_q;
     logic [31:0] mem_addr_q;
     logic [2:0]  funct3_q;
     logic [4:0]  rd_q;
@@ -202,6 +212,7 @@ module core_multicycle #(
         .mret(do_mret), .sret(do_sret),
         .retire(commit_valid && !commit_trap),
         .ext_mti(ext_mti), .ext_msi(ext_msi), .ext_mei(ext_mei),
+        .ext_sei(ext_sei),
         .mtvec(mtvec_v), .stvec(stvec_v),
         .mepc_out(mepc_v), .sepc_out(sepc_v),
         .priv_mode(priv_mode_v), .trap_to_s(trap_to_s_v),
@@ -599,11 +610,67 @@ module core_multicycle #(
     // trap_take so the state machine picks the right base.
     wire [31:0] trap_tvec = trap_to_s_v ? stvec_v : mtvec_v;
 
+`ifdef VERILATOR
+    // Debug $display traces (PCBAD/MCOMMIT/SCOMMIT/MSTORE/FETCH478) are OFF
+    // by default — they generate GBs of output and throttle sim wall time.
+    // Enable with `+trace_dbg` on the sim command line.
+    bit trace_dbg_en = 1'b0;
+    initial begin
+        if ($test$plusargs("trace_dbg")) trace_dbg_en = 1'b1;
+    end
+
+    // Sim-only: fire only when pc_d lands in the low 16 MB (includes pc=0).
+    // Kernel VAs (0xc0xx) and OpenSBI/DDR (0x4xxxxxxx) don't match; SRAM
+    // (0x8000xxxx) doesn't match either. Catches the "pc becomes 0" bug
+    // without flooding on every S-mode kernel instruction.
+    always_ff @(posedge clk) begin
+        if (trace_dbg_en && !rst && (pc_d != pc_q) && (pc_d[31:24] == 8'h00)) begin
+            $display("[PCBAD] t=%0t pc_q=%08x -> pc_d=%08x state=%0d priv=%0d irq_pending=%0d irq_cause=%08x trap_tvec=%08x to_s=%0d mtvec=%08x instr=%08x",
+                $time, pc_q, pc_d, state_q, priv_mode_v, irq_pending_v, irq_cause_v, trap_tvec, trap_to_s_v, mtvec_v, instr_q);
+        end
+    end
+
+    // Narrow trace: log every M-mode instruction commit and every M-mode
+    // store whose PC is in the sbi_timer range [0x40004000, 0x40005000),
+    // plus stores whose PC is inside the M-mode trap handler at
+    // [0x40000400, 0x40001000). This captures the timer-IRQ entry path,
+    // the sbi_timer_process call, and its epilogue.
+    wire in_sbi_timer   = (pc_q[31:12] == 20'h40004);
+    wire in_sbi_trap    = (pc_q[31:12] == 20'h40000) && (pc_q[11:8] >= 4'h4);
+    wire in_sbi_trap2   = (pc_q[31:12] == 20'h40005);
+    wire m_trace_active = in_sbi_timer || in_sbi_trap || in_sbi_trap2;
+    // Narrow S-mode window: Linux handle_exception entry block
+    wire in_handle_exc = (pc_q >= 32'hc09d8670) && (pc_q <= 32'hc09d86b0);
+    wire s_trace_active = in_handle_exc && (priv_mode_v == 2'b01);
+    always_ff @(posedge clk) begin
+        if (trace_dbg_en && !rst && commit_valid && (priv_mode_v == 2'b11) && m_trace_active) begin
+            $display("[MCOMMIT] t=%0t pc=%08x insn=%08x rd=%0d rdval=%08x trap=%0d cause=%08x",
+                $time, commit_pc, commit_insn, commit_rd_addr, commit_rd_data, commit_trap, commit_cause);
+        end
+        if (trace_dbg_en && !rst && commit_valid && s_trace_active) begin
+            $display("[SCOMMIT] t=%0t pc=%08x insn=%08x rd=%0d rdval=%08x rdwen=%0d trap=%0d cause=%08x",
+                $time, commit_pc, commit_insn, commit_rd_addr, commit_rd_data, commit_rd_wen, commit_trap, commit_cause);
+        end
+        if (trace_dbg_en && !rst && dmem_req_valid && dmem_req_wen && (priv_mode_v == 2'b11) && m_trace_active) begin
+            $display("[MSTORE] t=%0t pc=%08x addr=%08x wdata=%08x wmask=%04b",
+                $time, pc_q, dmem_req_addr, dmem_req_wdata, dmem_req_wmask);
+        end
+        // Trace every S_FETCH with pc_q at mtvec base to diagnose the
+        // stale-instr_q bug: print irq_pending/rsp_valid/rsp_data/instr_q/instr_d.
+        if (trace_dbg_en && !rst && (state_q == S_FETCH) && (pc_q == 32'h40000478)) begin
+            $display("[FETCH478] t=%0t irq=%0d rsp_v=%0d rsp_data=%08x instr_q=%08x instr_d=%08x state_d=%0d pc_d=%08x",
+                $time, irq_pending_v, ifetch_rsp_valid, ifetch_rsp_data, instr_q, instr_d, state_d, pc_d);
+        end
+    end
+`endif
+
     // =========================================================================
     // State machine — purely combinational drives of *_next and outputs
     // =========================================================================
     state_t      state_d;
     logic [31:0] pc_d, instr_d;
+    logic        fetch_inflight_d;
+    logic        fetch_squash_d;
     logic [31:0] mem_addr_d;
     logic [2:0]  funct3_d;
     logic [4:0]  rd_d;
@@ -665,6 +732,16 @@ module core_multicycle #(
         commit_trap    = 1'b0;
         commit_cause   = 32'd0;
 
+        // ifetch in-flight / squash defaults. Updated by S_FETCH below and
+        // by the trap-redirect branches in the unique case arms.
+        fetch_inflight_d = fetch_inflight_q;
+        fetch_squash_d   = fetch_squash_q;
+        // Any arriving response clears in-flight and any squash that matches.
+        if (fetch_inflight_q && ifetch_rsp_valid) begin
+            fetch_inflight_d = 1'b0;
+            fetch_squash_d   = 1'b0;
+        end
+
         unique case (state_q)
 
             // -------------------------------------------------------------
@@ -683,10 +760,25 @@ module core_multicycle #(
                                    ? ({trap_tvec[31:2], 2'b00} + {26'd0, irq_cause_v[3:0], 2'b00})
                                    : {trap_tvec[31:2], 2'b00};
                     state_d        = S_FETCH;
+                    // If a fetch for the interrupted pc is still in-flight
+                    // (or happens to arrive this cycle), mark its response as
+                    // stale so we don't latch it as the instruction at mtvec.
+                    if (fetch_inflight_q && !ifetch_rsp_valid) begin
+                        fetch_squash_d = 1'b1;
+                    end
                 end else begin
                     ifetch_req_valid = 1'b1;
                     ifetch_req_addr  = pc_q;
-                    if (ifetch_rsp_valid) begin
+                    // Request accepted: mark in-flight (only once per request).
+                    if (ifetch_req_valid && ifetch_req_ready && !fetch_inflight_q) begin
+                        fetch_inflight_d = 1'b1;
+                    end
+                    // Consume a response only if it matches our current in-flight
+                    // fetch (not a stale one from before a trap redirect).
+                    if (ifetch_rsp_valid && fetch_inflight_q && fetch_squash_q) begin
+                        // Drop stale response; stay in S_FETCH and retry next cycle.
+                        // (fetch_inflight_d / fetch_squash_d already cleared above.)
+                    end else if (ifetch_rsp_valid && fetch_inflight_q && !fetch_squash_q) begin
                         if (ifetch_rsp_fault || ifetch_rsp_pagefault) begin
                             // Fetch-fault trap: commit trap, redirect to mtvec.
                             commit_valid = 1'b1;
@@ -1012,6 +1104,8 @@ module core_multicycle #(
             state_q        <= S_FETCH;
             pc_q           <= RESET_PC;
             instr_q        <= 32'h0000_0013; // NOP
+            fetch_inflight_q <= 1'b0;
+            fetch_squash_q   <= 1'b0;
             mem_addr_q     <= 32'd0;
             funct3_q       <= 3'd0;
             rd_q           <= 5'd0;
@@ -1028,6 +1122,8 @@ module core_multicycle #(
             state_q        <= state_d;
             pc_q           <= pc_d;
             instr_q        <= instr_d;
+            fetch_inflight_q <= fetch_inflight_d;
+            fetch_squash_q   <= fetch_squash_d;
             mem_addr_q     <= mem_addr_d;
             funct3_q       <= funct3_d;
             rd_q           <= rd_d;

@@ -401,7 +401,7 @@ module axi_hello_top #(
         .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
         .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast),
 
-        .ext_mei(1'b0),
+        .uart_irq_i(uartlite_irq),
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr),
@@ -465,52 +465,142 @@ module axi_hello_top #(
     wire [1:0]  pc_rresp;
     wire        pc_rlast;
 
+    // JTAG-to-AXI master (S01 on the crossbar). The IP internally has an
+    // asynchronous BSCAN CDC; the M-side uses soc_clk. Runs with ID_WIDTH=1
+    // (the minimum the jtag_axi IP will take); the crossbar has ID_WIDTH=4
+    // per-SI, so we zero-pad the ID up on the way in.
+    wire        jx_awvalid, jx_awready;
+    wire [31:0] jx_awaddr;
+    wire [0:0]  jx_awid;
+    wire [7:0]  jx_awlen;
+    wire [2:0]  jx_awsize;
+    wire [1:0]  jx_awburst;
+    wire        jx_awlock;
+    wire [3:0]  jx_awcache;
+    wire [2:0]  jx_awprot;
+    wire [3:0]  jx_awqos;
+    wire        jx_wvalid,  jx_wready;
+    wire [31:0] jx_wdata;
+    wire [3:0]  jx_wstrb;
+    wire        jx_wlast;
+    wire        jx_bvalid,  jx_bready;
+    wire [0:0]  jx_bid;
+    wire [1:0]  jx_bresp;
+    wire        jx_arvalid, jx_arready;
+    wire [31:0] jx_araddr;
+    wire [0:0]  jx_arid;
+    wire [7:0]  jx_arlen;
+    wire [2:0]  jx_arsize;
+    wire [1:0]  jx_arburst;
+    wire        jx_arlock;
+    wire [3:0]  jx_arcache;
+    wire [2:0]  jx_arprot;
+    wire [3:0]  jx_arqos;
+    wire        jx_rvalid,  jx_rready;
+    wire [0:0]  jx_rid;
+    wire [31:0] jx_rdata;
+    wire [1:0]  jx_rresp;
+    wire        jx_rlast;
+
+    // No-connect buckets for the upper 3 bits of crossbar IDs routed to S01.
+    wire [2:0]  jx_bid_nc;
+    wire [2:0]  jx_rid_nc;
+
+    jtag_axi_0 u_jtag_axi (
+        .aclk          (soc_clk),
+        .aresetn       (~soc_rst),
+
+        .m_axi_awid    (jx_awid),
+        .m_axi_awaddr  (jx_awaddr),
+        .m_axi_awlen   (jx_awlen),
+        .m_axi_awsize  (jx_awsize),
+        .m_axi_awburst (jx_awburst),
+        .m_axi_awlock  (jx_awlock),
+        .m_axi_awcache (jx_awcache),
+        .m_axi_awprot  (jx_awprot),
+        .m_axi_awqos   (jx_awqos),
+        .m_axi_awvalid (jx_awvalid),
+        .m_axi_awready (jx_awready),
+
+        .m_axi_wdata   (jx_wdata),
+        .m_axi_wstrb   (jx_wstrb),
+        .m_axi_wlast   (jx_wlast),
+        .m_axi_wvalid  (jx_wvalid),
+        .m_axi_wready  (jx_wready),
+
+        .m_axi_bid     (jx_bid),
+        .m_axi_bresp   (jx_bresp),
+        .m_axi_bvalid  (jx_bvalid),
+        .m_axi_bready  (jx_bready),
+
+        .m_axi_arid    (jx_arid),
+        .m_axi_araddr  (jx_araddr),
+        .m_axi_arlen   (jx_arlen),
+        .m_axi_arsize  (jx_arsize),
+        .m_axi_arburst (jx_arburst),
+        .m_axi_arlock  (jx_arlock),
+        .m_axi_arcache (jx_arcache),
+        .m_axi_arprot  (jx_arprot),
+        .m_axi_arqos   (jx_arqos),
+        .m_axi_arvalid (jx_arvalid),
+        .m_axi_arready (jx_arready),
+
+        .m_axi_rid     (jx_rid),
+        .m_axi_rdata   (jx_rdata),
+        .m_axi_rresp   (jx_rresp),
+        .m_axi_rlast   (jx_rlast),
+        .m_axi_rvalid  (jx_rvalid),
+        .m_axi_rready  (jx_rready)
+    );
+
     axi_crossbar_0 u_xbar (
         .aclk    (soc_clk),
         .aresetn (~soc_rst),
 
-        // S00 — from soc_top
-        .s_axi_awid    (m_axi_awid),
-        .s_axi_awaddr  (m_axi_awaddr),
-        .s_axi_awlen   (m_axi_awlen),
-        .s_axi_awsize  (m_axi_awsize),
-        .s_axi_awburst (m_axi_awburst),
-        .s_axi_awlock  (m_axi_awlock),
-        .s_axi_awcache (m_axi_awcache),
-        .s_axi_awprot  (m_axi_awprot),
-        .s_axi_awqos   (m_axi_awqos),
-        .s_axi_awvalid (m_axi_awvalid),
-        .s_axi_awready (m_axi_awready),
+        // S{01,00} — {JTAG, soc_top}. Vivado concatenates SI signals with S01
+        // at the upper bits, so we build the concatenation explicitly.
+        // jtag_axi has ID_WIDTH=1, crossbar has ID_WIDTH=4 per SI — zero-pad.
+        .s_axi_awid    ({3'd0, jx_awid,  m_axi_awid}),
+        .s_axi_awaddr  ({jx_awaddr,      m_axi_awaddr}),
+        .s_axi_awlen   ({jx_awlen,       m_axi_awlen}),
+        .s_axi_awsize  ({jx_awsize,      m_axi_awsize}),
+        .s_axi_awburst ({jx_awburst,     m_axi_awburst}),
+        .s_axi_awlock  ({jx_awlock,      m_axi_awlock}),
+        .s_axi_awcache ({jx_awcache,     m_axi_awcache}),
+        .s_axi_awprot  ({jx_awprot,      m_axi_awprot}),
+        .s_axi_awqos   ({jx_awqos,       m_axi_awqos}),
+        .s_axi_awvalid ({jx_awvalid,     m_axi_awvalid}),
+        .s_axi_awready ({jx_awready,     m_axi_awready}),
 
-        .s_axi_wdata   (m_axi_wdata),
-        .s_axi_wstrb   (m_axi_wstrb),
-        .s_axi_wlast   (m_axi_wlast),
-        .s_axi_wvalid  (m_axi_wvalid),
-        .s_axi_wready  (m_axi_wready),
+        .s_axi_wdata   ({jx_wdata,       m_axi_wdata}),
+        .s_axi_wstrb   ({jx_wstrb,       m_axi_wstrb}),
+        .s_axi_wlast   ({jx_wlast,       m_axi_wlast}),
+        .s_axi_wvalid  ({jx_wvalid,      m_axi_wvalid}),
+        .s_axi_wready  ({jx_wready,      m_axi_wready}),
 
-        .s_axi_bid     (m_axi_bid),
-        .s_axi_bresp   (m_axi_bresp),
-        .s_axi_bvalid  (m_axi_bvalid),
-        .s_axi_bready  (m_axi_bready),
+        .s_axi_bid     ({jx_bid_nc, jx_bid, m_axi_bid}),
+        .s_axi_bresp   ({jx_bresp,       m_axi_bresp}),
+        .s_axi_bvalid  ({jx_bvalid,      m_axi_bvalid}),
+        .s_axi_bready  ({jx_bready,      m_axi_bready}),
 
-        .s_axi_arid    (m_axi_arid),
-        .s_axi_araddr  (m_axi_araddr),
-        .s_axi_arlen   (m_axi_arlen),
-        .s_axi_arsize  (m_axi_arsize),
-        .s_axi_arburst (m_axi_arburst),
-        .s_axi_arlock  (m_axi_arlock),
-        .s_axi_arcache (m_axi_arcache),
-        .s_axi_arprot  (m_axi_arprot),
-        .s_axi_arqos   (m_axi_arqos),
-        .s_axi_arvalid (m_axi_arvalid),
-        .s_axi_arready (m_axi_arready),
+        .s_axi_arid    ({3'd0, jx_arid,  m_axi_arid}),
+        .s_axi_araddr  ({jx_araddr,      m_axi_araddr}),
+        .s_axi_arlen   ({jx_arlen,       m_axi_arlen}),
+        .s_axi_arsize  ({jx_arsize,      m_axi_arsize}),
+        .s_axi_arburst ({jx_arburst,     m_axi_arburst}),
+        .s_axi_arlock  ({jx_arlock,      m_axi_arlock}),
+        .s_axi_arcache ({jx_arcache,     m_axi_arcache}),
+        .s_axi_arprot  ({jx_arprot,      m_axi_arprot}),
+        .s_axi_arqos   ({jx_arqos,       m_axi_arqos}),
+        .s_axi_arvalid ({jx_arvalid,     m_axi_arvalid}),
+        .s_axi_arready ({jx_arready,     m_axi_arready}),
 
-        .s_axi_rid     (m_axi_rid),
-        .s_axi_rdata   (m_axi_rdata),
-        .s_axi_rresp   (m_axi_rresp),
-        .s_axi_rlast   (m_axi_rlast),
-        .s_axi_rvalid  (m_axi_rvalid),
-        .s_axi_rready  (m_axi_rready),
+        .s_axi_rid     ({jx_rid_nc, jx_rid, m_axi_rid}),
+        .s_axi_rdata   ({jx_rdata,       m_axi_rdata}),
+        .s_axi_rresp   ({jx_rresp,       m_axi_rresp}),
+        .s_axi_rlast   ({jx_rlast,       m_axi_rlast}),
+        .s_axi_rvalid  ({jx_rvalid,      m_axi_rvalid}),
+        .s_axi_rready  ({jx_rready,      m_axi_rready}),
 
         // M-side: M00 = MIG branch (soc_clk side of converter), M01 = uart-via-pc.
         .m_axi_awaddr  ({pc_awaddr,   xm_awaddr}),

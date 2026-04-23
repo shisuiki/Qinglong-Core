@@ -146,10 +146,16 @@ module mmu (
     logic        if_xlate_valid_q, if_xlate_valid_d;
     logic        if_xlate_fault_q, if_xlate_fault_d;
     logic [31:0] if_xlate_pa_q,    if_xlate_pa_d;
+    // VA tag — the walk-result cache is only valid for the VA it was computed
+    // for. Without this tag, if a PTW completes for VA_A but the core has
+    // already redirected (trap/IRQ) to VA_B, the cache's PA gets wrongly
+    // reused via if_forward, sending VA_A's PA to the bus for a VA_B fetch.
+    logic [31:0] if_xlate_va_q,    if_xlate_va_d;
 
     logic        dm_xlate_valid_q, dm_xlate_valid_d;
     logic        dm_xlate_fault_q, dm_xlate_fault_d;
     logic [31:0] dm_xlate_pa_q,    dm_xlate_pa_d;
+    logic [31:0] dm_xlate_va_q,    dm_xlate_va_d;
 
     // ---------------------------------------------------------------------
     // TLB — per-side fully-associative, SW-managed.
@@ -240,9 +246,14 @@ module mmu (
     logic [11:0] ptw_l1_ppn1_q, ptw_l1_ppn1_d; // from L1 PTE for L0 step
     logic [9:0]  ptw_l1_ppn0_q, ptw_l1_ppn0_d;
 
-    // Walk kickoff — only when TLB misses AND the walk-result cache is empty.
-    wire if_needs_walk = xlate_if && if_core_req_valid && !if_tlb_hit && !if_xlate_valid_q;
-    wire dm_needs_walk = xlate_dm && dm_core_req_valid && !dm_tlb_hit && !dm_xlate_valid_q;
+    // Walk kickoff — only when TLB misses AND the walk-result cache isn't
+    // servable. "Servable" here means cache is valid *and* the VA matches
+    // the current request; a valid-but-mismatched entry (leftover from a
+    // walk aborted by an IRQ redirect) must not suppress a fresh walk.
+    wire if_xlate_cache_usable = if_xlate_valid_q && (if_xlate_va_q[31:12] == if_core_req_addr[31:12]);
+    wire dm_xlate_cache_usable = dm_xlate_valid_q && (dm_xlate_va_q[31:12] == dm_core_req_addr[31:12]);
+    wire if_needs_walk = xlate_if && if_core_req_valid && !if_tlb_hit && !if_xlate_cache_usable;
+    wire dm_needs_walk = xlate_dm && dm_core_req_valid && !dm_tlb_hit && !dm_xlate_cache_usable;
     wire launch_if = (ptw_state_q == PTW_IDLE) && if_needs_walk;
     wire launch_dm = (ptw_state_q == PTW_IDLE) && !if_needs_walk && dm_needs_walk;
 
@@ -310,9 +321,11 @@ module mmu (
         if_xlate_valid_d = if_xlate_valid_q;
         if_xlate_fault_d = if_xlate_fault_q;
         if_xlate_pa_d    = if_xlate_pa_q;
+        if_xlate_va_d    = if_xlate_va_q;
         dm_xlate_valid_d = dm_xlate_valid_q;
         dm_xlate_fault_d = dm_xlate_fault_q;
         dm_xlate_pa_d    = dm_xlate_pa_q;
+        dm_xlate_va_d    = dm_xlate_va_q;
 
         // TLB fills default off; walk completion asserts these on valid leaf.
         if_tlb_fill   = 1'b0;
@@ -359,9 +372,11 @@ module mmu (
                         if (ptw_side_q == 1'b0) begin
                             if_xlate_valid_d = 1'b1;
                             if_xlate_fault_d = 1'b1;
+                            if_xlate_va_d    = ptw_va_q;
                         end else begin
                             dm_xlate_valid_d = 1'b1;
                             dm_xlate_fault_d = 1'b1;
+                            dm_xlate_va_d    = ptw_va_q;
                         end
                         ptw_state_d = PTW_IDLE;
                     end else if (pte_is_leaf) begin
@@ -370,6 +385,7 @@ module mmu (
                             if_xlate_valid_d = 1'b1;
                             if_xlate_fault_d = !l1_leaf_ok;
                             if_xlate_pa_d    = l1_leaf_ok ? {pte_ppn1, ptw_va_q[21:0]} : 32'd0;
+                            if_xlate_va_d    = ptw_va_q;
                             // Fill TLB on a well-formed superpage (even if the
                             // live permission check failed — fault stays out).
                             if (!l1_leaf_misaligned) begin
@@ -391,6 +407,7 @@ module mmu (
                             dm_xlate_valid_d = 1'b1;
                             dm_xlate_fault_d = !l1_leaf_ok;
                             dm_xlate_pa_d    = l1_leaf_ok ? {pte_ppn1, ptw_va_q[21:0]} : 32'd0;
+                            dm_xlate_va_d    = ptw_va_q;
                             if (!l1_leaf_misaligned) begin
                                 dm_tlb_fill           = 1'b1;
                                 dm_tlb_fill_e.valid   = 1'b1;
@@ -433,6 +450,7 @@ module mmu (
                         if_xlate_valid_d = 1'b1;
                         if_xlate_fault_d = !l0_leaf_ok;
                         if_xlate_pa_d    = l0_leaf_ok ? {pte_ppn1[9:0], pte_ppn0, ptw_va_q[11:0]} : 32'd0;
+                        if_xlate_va_d    = ptw_va_q;
                         if (l0_well_formed) begin
                             if_tlb_fill           = 1'b1;
                             if_tlb_fill_e.valid   = 1'b1;
@@ -452,6 +470,7 @@ module mmu (
                         dm_xlate_valid_d = 1'b1;
                         dm_xlate_fault_d = !l0_leaf_ok;
                         dm_xlate_pa_d    = l0_leaf_ok ? {pte_ppn1[9:0], pte_ppn0, ptw_va_q[11:0]} : 32'd0;
+                        dm_xlate_va_d    = ptw_va_q;
                         if (l0_well_formed) begin
                             dm_tlb_fill           = 1'b1;
                             dm_tlb_fill_e.valid   = 1'b1;
@@ -534,7 +553,7 @@ module mmu (
         end else if (if_tlb_go) begin
             if_pmp_addr   = if_tlb_pa;
             if_pmp_active = if_core_req_valid;
-        end else if (xlate_if && if_xlate_valid_q && !if_xlate_fault_q) begin
+        end else if (xlate_if && if_xlate_valid_q && !if_xlate_fault_q && if_xlate_va_match) begin
             if_pmp_addr   = if_xlate_pa_q;
             if_pmp_active = if_core_req_valid;
         end
@@ -549,7 +568,7 @@ module mmu (
         end else if (dm_tlb_go) begin
             dm_pmp_addr   = dm_tlb_pa;
             dm_pmp_active = dm_core_req_valid;
-        end else if (xlate_dm && dm_xlate_valid_q && !dm_xlate_fault_q) begin
+        end else if (xlate_dm && dm_xlate_valid_q && !dm_xlate_fault_q && dm_xlate_va_match) begin
             dm_pmp_addr   = dm_xlate_pa_q;
             dm_pmp_active = dm_core_req_valid;
         end
@@ -599,8 +618,16 @@ module mmu (
     wire  dm_pmp_kill = dm_pmp_kill_comb || dm_pmp_pending_q;
 
     // IFETCH
-    wire if_forward = xlate_if && if_xlate_valid_q && !if_xlate_fault_q;
-    wire if_fault_reply = xlate_if && if_xlate_valid_q &&  if_xlate_fault_q;
+    // VA-tag check: the walk-result cache is only valid for the VA it was
+    // computed for. Compare VPN (top 20 bits) since all translation is
+    // page-granular. The check only gates a *new* request — when the core
+    // drops req_valid mid-transaction (rsp-wait in the multicycle FSM), the
+    // cache must still forward the pending rsp, since the bus is single-
+    // outstanding so an arriving rsp is necessarily for the cached VA.
+    wire if_xlate_va_match   = (if_xlate_va_q[31:12] == if_core_req_addr[31:12]);
+    wire if_xlate_cache_live = if_xlate_valid_q && (!if_core_req_valid || if_xlate_va_match);
+    wire if_forward          = xlate_if && if_xlate_cache_live && !if_xlate_fault_q;
+    wire if_fault_reply      = xlate_if && if_xlate_cache_live &&  if_xlate_fault_q;
 
     always_comb begin
         if_core_rsp_pagefault = 1'b0;
@@ -672,12 +699,26 @@ module mmu (
         end
     end
 
+`ifdef VERILATOR
+    // [IF-FAULT] is fault-only (~0 events on a clean boot), so it stays
+    // always-on as a real-error indicator rather than gated behind +trace_dbg.
+    always_ff @(posedge clk) begin
+        if (!rst && if_core_rsp_valid && if_core_rsp_fault) begin
+            $display("[IF-FAULT] t=%0t pc=%08x priv=%0d xlate=%0d pmp_kill=%0d ds_fault=%0d",
+                $time, if_core_req_addr, priv_i, xlate_if, if_pmp_kill, if_ds_rsp_fault);
+        end
+    end
+`endif
+
+
     wire if_forward_rsp_done = if_forward && if_ds_rsp_valid && if_core_rsp_ready;
     wire if_fault_rsp_done   = if_fault_reply && if_core_rsp_ready;
 
     // DMEM
-    wire dm_forward     = xlate_dm && dm_xlate_valid_q && !dm_xlate_fault_q;
-    wire dm_fault_reply = xlate_dm && dm_xlate_valid_q &&  dm_xlate_fault_q;
+    wire dm_xlate_va_match   = (dm_xlate_va_q[31:12] == dm_core_req_addr[31:12]);
+    wire dm_xlate_cache_live = dm_xlate_valid_q && (!dm_core_req_valid || dm_xlate_va_match);
+    wire dm_forward          = xlate_dm && dm_xlate_cache_live && !dm_xlate_fault_q;
+    wire dm_fault_reply = xlate_dm && dm_xlate_cache_live &&  dm_xlate_fault_q;
 
     always_comb begin
         dm_core_rsp_pagefault = 1'b0;
@@ -801,9 +842,11 @@ module mmu (
             if_xlate_valid_q <= 1'b0;
             if_xlate_fault_q <= 1'b0;
             if_xlate_pa_q    <= 32'd0;
+            if_xlate_va_q    <= 32'd0;
             dm_xlate_valid_q <= 1'b0;
             dm_xlate_fault_q <= 1'b0;
             dm_xlate_pa_q    <= 32'd0;
+            dm_xlate_va_q    <= 32'd0;
             if_repl_q        <= '0;
             dm_repl_q        <= '0;
             if_pmp_pending_q <= 1'b0;
@@ -826,9 +869,11 @@ module mmu (
             if_xlate_valid_q <= if_xlate_valid_d;
             if_xlate_fault_q <= if_xlate_fault_d;
             if_xlate_pa_q    <= if_xlate_pa_d;
+            if_xlate_va_q    <= if_xlate_va_d;
             dm_xlate_valid_q <= dm_xlate_valid_d;
             dm_xlate_fault_q <= dm_xlate_fault_d;
             dm_xlate_pa_q    <= dm_xlate_pa_d;
+            dm_xlate_va_q    <= dm_xlate_va_d;
 
             // Stuff the walk-result cache from a TLB fast-path handshake if
             // the rsp didn't complete same cycle. This lets the next-cycle
@@ -839,19 +884,23 @@ module mmu (
                 if_xlate_valid_q <= 1'b1;
                 if_xlate_fault_q <= 1'b0;
                 if_xlate_pa_q    <= if_tlb_pa;
+                if_xlate_va_q    <= if_core_req_addr;
             end
             if (if_tlb_deny && if_core_req_valid && !if_tlb_deny_fire && !if_xlate_valid_q) begin
                 if_xlate_valid_q <= 1'b1;
                 if_xlate_fault_q <= 1'b1;
+                if_xlate_va_q    <= if_core_req_addr;
             end
             if (dm_tlb_req_fire && !dm_tlb_rsp_fire && !dm_xlate_valid_q) begin
                 dm_xlate_valid_q <= 1'b1;
                 dm_xlate_fault_q <= 1'b0;
                 dm_xlate_pa_q    <= dm_tlb_pa;
+                dm_xlate_va_q    <= dm_core_req_addr;
             end
             if (dm_tlb_deny && dm_core_req_valid && !dm_tlb_deny_fire && !dm_xlate_valid_q) begin
                 dm_xlate_valid_q <= 1'b1;
                 dm_xlate_fault_q <= 1'b1;
+                dm_xlate_va_q    <= dm_core_req_addr;
             end
 
             // Clear the result when the current transaction retires. This

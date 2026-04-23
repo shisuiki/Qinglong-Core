@@ -38,7 +38,8 @@ changes needed.
 | `rv32um-p-*`  |          8 | `isa/rv32um/Makefrag`         |
 | `rv32ua-p-*`  |         10 | `isa/rv32ua/Makefrag`         |
 | `rv32mi-p-*`  |         16 | `isa/rv32mi/Makefrag`         |
-| **total**     |     **76** |                               |
+| `rv32si-p-*`  |          6 | `isa/rv32si/Makefrag`         |
+| **total**     |     **82** |                               |
 
 ### rv32ui-p-* (42)
 
@@ -61,6 +62,30 @@ breakpoint csr illegal instret_overflow lh-misaligned lw-misaligned
 ma_addr ma_fetch mcsr pmpaddr sbreak scall sh-misaligned shamt
 sw-misaligned zicntr
 
+### rv32si-p-* (6)
+
+csr dirty ma_fetch sbreak scall wfi
+
+## Current pass/fail baseline (2026-04-20, core_multicycle, `make build`)
+
+| Family    | PASS | FAIL | Notes on failures                                 |
+|-----------|-----:|-----:|---------------------------------------------------|
+| rv32ui    | 41   | 1    | `ma_data` — we trap misaligned, test expects hw   |
+| rv32um    |  8   | 0    |                                                   |
+| rv32ua    | 10   | 0    |                                                   |
+| rv32mi    | 15   | 1    | `breakpoint` — no debug trigger module (by design)|
+| rv32si    |  5   | 1    | `dirty` — timeout, Sv32 A/D-bit handling suspect  |
+| **total** | 79   | 3    | 3 known gaps, not regressions                     |
+
+Run the full baseline any time with:
+
+```
+cd sim && make build
+FAMILIES="rv32ui rv32um rv32ua rv32mi rv32si" \
+  TIMEOUT=800000 \
+  bash scripts/regress.sh build/obj_dir/Vsoc_tb_top
+```
+
 ## Tests that failed to build
 
 **None** among the four families we care about — all 76 target ELFs
@@ -75,10 +100,11 @@ default include path, and those tests `#include <string.h>` from
 ignored — `Makefile.top` asks only for the `-p-` dumps, so the `-v-`
 build rules are never triggered.
 
-The rv32 floating-point / compressed / bit-manip / supervisor-mode
-families (`rv32uc`, `rv32uf`, `rv32ud`, `rv32uzfh`, `rv32uzb*`,
-`rv32si`) are out of scope for an RV32IMA machine-mode-only Stage 0
-and are likewise not built by the wrapper.
+The rv32 floating-point / compressed / bit-manip families (`rv32uc`,
+`rv32uf`, `rv32ud`, `rv32uzfh`, `rv32uzb*`) are out of scope for the
+RV32IMA core and are not built by the wrapper. `rv32si` **is** now
+built (added when OpenSBI/Linux bring-up put S-mode on the critical
+path).
 
 ## Entry-point sanity check
 

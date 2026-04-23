@@ -17,7 +17,7 @@ ISA_DIR="$REPO/sw/riscv-tests/isa"
 OUT_DIR="$REPO/sim/build/regress"
 mkdir -p "$OUT_DIR"
 
-FAMILIES="${FAMILIES:-rv32ui rv32mi rv32um rv32ua}"
+FAMILIES="${FAMILIES:-rv32ui rv32mi rv32um rv32ua rv32si}"
 TIMEOUT="${TIMEOUT:-400000}"
 KEEP_GOING="${KEEP_GOING:-1}"
 

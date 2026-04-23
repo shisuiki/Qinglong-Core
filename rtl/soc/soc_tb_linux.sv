@@ -1,17 +1,13 @@
-// Thin Verilator testbench wrapper: pins out only the signals the C++ harness
-// needs to observe directly. (Verilator treats this as the `top` module.)
+// Testbench wrapper for Verilator — brings up OpenSBI + Linux in simulation.
 //
-// Owns the sim peripheral fabric hanging off soc_top's AXI4-full master port.
-// The bus type was promoted from AXI4-Lite to AXI4-full at Stage 7a so the
-// shape matches what MIG7 / Vivado axi_crossbar / a future cached burst master
-// expect — even though the protocol traffic is still single-beat right now.
-//
-// Topology:
-//   soc_top.m_axi_*  →  axi4_router_1x2  →  s0: axil_uartlite_sim @ 0xC000_0000
-//                                            s1: axil_bram_slave   @ 0xC000_1000
-//   Anything outside slaves 0/1 returns DECERR via the router's internal stub.
+// Mirrors the FPGA memory map: 64 MiB of AXI-backed "DDR" at 0x4000_0000 and
+// AXI-UartLite at 0xC000_0000. The CPU reset vector is 0x4000_0000 — the
+// C++ harness preloads fw_jump / Image / DTB / initramfs directly into the
+// DDR model via the ddr_dpi_write backdoor, skipping the BootROM handshake
+// entirely (the BootROM's only job in silicon is to wait for JTAG to stage
+// images, which we accomplish before the first clock tick here).
 
-module soc_tb_top (
+module soc_tb_linux (
     input  logic        clk,
     input  logic        rst,
 
@@ -27,7 +23,19 @@ module soc_tb_top (
     output logic [4:0]  commit_rd_addr,
     output logic [31:0] commit_rd_data,
     output logic        commit_trap,
-    output logic [31:0] commit_cause
+    output logic [31:0] commit_cause,
+
+    output logic        tap_dm_req_fire,
+    output logic [31:0] tap_dm_req_va,
+    output logic [31:0] tap_dm_req_pa,
+    output logic        tap_dm_req_wen,
+    output logic [31:0] tap_dm_req_wdata,
+    output logic [3:0]  tap_dm_req_wmask,
+    output logic [1:0]  tap_dm_req_size,
+    output logic        tap_dm_rsp_fire,
+    output logic [31:0] tap_dm_rsp_rdata,
+    output logic        tap_dm_rsp_fault,
+    output logic        tap_dm_rsp_pagefault
 );
 
     // ---------- AXI4 master out of soc_top ----------
@@ -64,7 +72,10 @@ module soc_tb_top (
     logic [1:0]  m_axi_rresp;
     logic        m_axi_rlast;
 
-    soc_top u_soc (
+    // Reset vector matches silicon: BootROM in SRAM polls the handshake word
+    // in DDR and jumps to OpenSBI. Harness preloads SRAM + DDR + handshake
+    // via DPI, then releases reset — exactly what JTAG-to-AXI does on FPGA.
+    soc_top #(.RESET_PC(32'h8000_0000)) u_soc (
         .clk(clk), .rst(rst),
         .console_valid(console_valid), .console_byte(console_byte),
         .console_ready(1'b1),
@@ -95,10 +106,22 @@ module soc_tb_top (
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
-        .commit_trap(commit_trap), .commit_cause(commit_cause)
+        .commit_trap(commit_trap), .commit_cause(commit_cause),
+
+        .tap_dm_req_fire(tap_dm_req_fire),
+        .tap_dm_req_va(tap_dm_req_va),
+        .tap_dm_req_pa(tap_dm_req_pa),
+        .tap_dm_req_wen(tap_dm_req_wen),
+        .tap_dm_req_wdata(tap_dm_req_wdata),
+        .tap_dm_req_wmask(tap_dm_req_wmask),
+        .tap_dm_req_size(tap_dm_req_size),
+        .tap_dm_rsp_fire(tap_dm_rsp_fire),
+        .tap_dm_rsp_rdata(tap_dm_rsp_rdata),
+        .tap_dm_rsp_fault(tap_dm_rsp_fault),
+        .tap_dm_rsp_pagefault(tap_dm_rsp_pagefault)
     );
 
-    // ---------- AXI4 router → 2× AXI-Lite slaves ----------
+    // ---------- AXI4 router → DDR + UartLite ----------
     logic        s0_aw_v, s0_aw_r, s0_w_v, s0_w_r, s0_b_v, s0_b_r;
     logic [31:0] s0_aw_a, s0_w_d, s0_ar_a, s0_r_d;
     logic [2:0]  s0_aw_p, s0_ar_p;
@@ -113,7 +136,7 @@ module soc_tb_top (
     logic [1:0]  s1_b_resp, s1_r_resp;
     logic        s1_ar_v, s1_ar_r, s1_r_v, s1_r_r;
 
-    axi4_router_1x2 #(.ID_W(4)) u_xbar (
+    axi4_router_linux #(.ID_W(4)) u_xbar (
         .clk(clk), .rst(rst),
 
         .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
@@ -160,8 +183,11 @@ module soc_tb_top (
         .s1_axil_rdata(s1_r_d),    .s1_axil_rresp(s1_r_resp)
     );
 
-    // ---------- slave 0: UartLite stub @ 0xC000_0000 ----------
-    axil_uartlite_sim u_ul (
+    // ---------- slave 0: DDR @ 0x4000_0000 (128 MiB) ----------
+    // Address into the slave is the full 32-bit bus address; the slave
+    // strips high bits implicitly via its internal WORDS-sized index.
+    // WORDS=32M gives a 128 MiB aperture, matching the DT's memory node.
+    axil_bram_big #(.WORDS(32 * 1024 * 1024)) u_ddr (
         .clk(clk), .rst(rst),
         .s_axil_awvalid(s0_aw_v),  .s_axil_awready(s0_aw_r),
         .s_axil_awaddr(s0_aw_a),   .s_axil_awprot(s0_aw_p),
@@ -175,8 +201,8 @@ module soc_tb_top (
         .s_axil_rdata(s0_r_d),     .s_axil_rresp(s0_r_resp)
     );
 
-    // ---------- slave 1: BRAM @ 0xC000_1000 ----------
-    axil_bram_slave #(.WORDS(1024)) u_axi_bram (
+    // ---------- slave 1: UartLite @ 0xC000_0000 ----------
+    axil_uartlite_sim u_ul (
         .clk(clk), .rst(rst),
         .s_axil_awvalid(s1_aw_v),  .s_axil_awready(s1_aw_r),
         .s_axil_awaddr(s1_aw_a),   .s_axil_awprot(s1_aw_p),

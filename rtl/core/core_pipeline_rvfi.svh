@@ -225,10 +225,28 @@ end
 // -----------------------------------------------------------------------------
 // RVFI outputs
 // -----------------------------------------------------------------------------
-assign rvfi_valid     = wb_valid_q;
+// Sync vs async trap split. Async IRQs squash the insn in EX (see
+// core_pipeline.sv:924) and propagate to wb_trap_q with wb_cause_q[31]=1.
+// Per RVFI spec, such retirements must NOT surface as rvfi_trap; instead the
+// handler's first retired insn carries rvfi_intr=1. We therefore suppress the
+// squashed retirement entirely (rvfi_valid=0) and only expose rvfi_trap for
+// synchronous exceptions. `rvfi_intr_pending_q` already latches on cause[31]
+// retirements and emits on the next wb_valid_q.
+wire rvfi_async_retire = wb_valid_q && wb_trap_q && wb_cause_q[31];
+
+// Fetch-fault retirements don't carry a meaningful instruction word — the
+// pipe latched whatever the faulting bus returned, which a formal solver can
+// construct to match any per-insn spec predicate. Force rvfi_insn to zero so
+// opcode decode misses every insn_* check.
+wire rvfi_fetch_trap = wb_trap_q && !wb_cause_q[31] &&
+                       ((wb_cause_q == `CAUSE_INSN_ADDR_MISALIGNED) ||
+                        (wb_cause_q == `CAUSE_INSN_ACCESS_FAULT)    ||
+                        (wb_cause_q == `CAUSE_INSN_PAGE_FAULT));
+
+assign rvfi_valid     = wb_valid_q && !rvfi_async_retire;
 assign rvfi_order     = rvfi_order_q;
-assign rvfi_insn      = wb_instr_q;
-assign rvfi_trap      = wb_trap_q;
+assign rvfi_insn      = rvfi_fetch_trap ? 32'd0 : wb_instr_q;
+assign rvfi_trap      = wb_trap_q && !wb_cause_q[31];
 assign rvfi_halt      = 1'b0;
 assign rvfi_intr      = rvfi_intr_pending_q;
 assign rvfi_mode      = 2'b11;

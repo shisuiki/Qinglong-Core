@@ -2,6 +2,108 @@
 
 Chronological log of what's been done and what's next. Newest entries at the top.
 
+## 2026-04-21 — Stage 7g: Linux sim reaches userspace; /sbin/init runs
+
+### Status
+Kernel now boots end-to-end in Verilator sim and hands off to `/sbin/init`, which runs for ~150 ms before a residual kernel trap-entry fault. 0 `PCBAD` events across 3.6B cycles. This closes the "silent hang" symptom documented in the 2026-04-19 entry.
+
+### What shipped (all in working tree, unstaged)
+- **`rtl/core/core_multicycle.sv`** — `fetch_inflight_q` / `fetch_squash_q` mechanism on the IRQ-redirect path. Mirrors the pre-existing squash in `core_pipeline.sv`: when an M-mode IRQ fires during an in-flight DDR ifetch, the stale response that lands next cycle is dropped instead of being accepted as the instruction at the trap vector. Prior to this fix, OpenSBI's first `csrrw tp, mscratch, tp` at 0x40000478 was being replaced by whatever DDR response arrived late (e.g. the kernel's `addi a4,a4,2` = 0x00270713), which made the xor-trick misfire and cascaded into the observed trap storm at pc=0.
+- **`rtl/core/core_pipeline_rvfi.svh`** — sync/async trap signal split + `rvfi_insn` sanitization on fetch faults. Unblocked 40/40 formal PASS with ifetch faults + IRQs left symbolic (tasks #113, #114).
+- **`rtl/core/csr.sv`** — `MIP_M_WRITABLE=0x222` / `MIP_S_WRITABLE=0x002` split so M-mode can't accidentally clear S-mode's STIP, and vice-versa.
+- **`rtl/soc/soc_top.sv`** — (a) 3-way PTW/IF/DM arbiter so page-table walks reach DDR for DDR-resident PGDs (previously PTW was hardwired to SRAM port B, which returned zero for kernel VAs → persistent page-fault loop). (b) `if_bad_rsp_valid_q` one-pulse gate so a transient is_bad on a trap-commit cycle doesn't latch a spurious fault response on the next cycle.
+- **`rtl/soc/axi4_master.sv`** — `req_ready = IDLE && !rsp_valid_q` so a client doesn't refetch on the same cycle a response pulses. Without this the core occasionally issued a redundant fetch for a stale PC.
+- **`sw/linux/riscv_soc.dts`** — bootargs: dropped `root=/dev/ram0 rw` (CONFIG_BLK_DEV_RAM is not set — the kernel then panicked trying to mount /dev/ram0 after unpacking the initramfs). Kept `rdinit=/sbin/init`. Also extended `linux,initrd-end` 0x43900000 → 0x44500000 to cover the full 20 MB uncompressed cpio.
+
+### Sim boot log highlights
+- BootROM @ 0x80000000 handshake → OpenSBI fw_jump @ 0x40000000 → kernel @ 0x40400000.
+- `sched_clock: 64 bits at 50MHz`, `check_unaligned_access` passes, M-timer IRQ dispatches cleanly through `mtvec=0x40000478`.
+- `[22.6s] ttyUL0 uartlite registered as console`.
+- `[29.9s] debug_vm_pgtable` MMU stress test runs.
+- `[52.0s] Run /sbin/init as init process`.
+- `[52.19s]` kernel panic: `Unable to handle kernel access to user memory without uaccess routines at virtual address 947122ec` — faulting instruction is `sw sp, 12(tp)` inside Linux's `handle_exception` prologue; `tp` came from `csrrw tp, sscratch, tp` but held a user VA, i.e. `sscratch` held a user value at trap time.
+
+### Tests
+- Regression stable at **79/82** rv32ui/um/ua/mi/si (ma_data, breakpoint, rv32si-p-dirty still parked — unchanged from pre-fix baseline).
+- Sim invocation (reproducible):
+  ```
+  ./build/obj_linux/Vsoc_tb_linux \
+    +fw=<buildroot>/output/images/fw_jump.bin \
+    +kernel=<buildroot>/output/build/linux-6.6.32/arch/riscv/boot/Image \
+    +dtb=<repo>/sw/linux/riscv_soc.dtb \
+    +initrd=<buildroot>/output/images/rootfs.cpio \
+    +bootrom=<repo>/sw/bootrom/bootrom.bin \
+    +timeout=3600000000
+  ```
+  `+bootrom=` is required: without it the reset vector at 0x80000000 is all-zero and the core traps immediately.
+
+### Caveats
+- **Sim residual**: sscratch/handle_exception fault above. Sim throughput is ~1.3 MHz, so kernel->userspace is ~45 min wall for the 3.6B-cycle run. Next: targeted `[SSCRATCH]` trace in csr.sv to catch the last kernel→user sscratch write before the fault.
+- **Silicon residual (task #102)**: the accumulated RTL fixes (MIP split / PTW-DDR routing / axi4 fetch race / if_bad one-pulse / fetch_squash) aren't yet in a bitstream — silicon Linux boot will likely reproduce the old jump-to-0 until rebuilt.
+- Debug instrumentation (`[PCBAD]`, `[MCOMMIT]`, `[MSTORE]`, `[FETCH478]`, `[MSCRATCH]`, `[TRAP]`, `[IF-FAULT]`, `[SOC-IF-FAULT]`, `[AXIM-READ-FAULT]`) is still in the RTL files. To be stripped before commit once the sscratch residual is understood.
+
+### Next step
+Decide whether to (a) push for the sscratch residual in sim before committing, or (b) freeze the current fixes, commit Stage 7g, and chase the sscratch fault as a separate cleanup — then rebuild the silicon bitstream (task #102) and re-test on the board.
+
+## 2026-04-19 — Stage 7c through 7f: Linux boot infrastructure
+
+Captures the work between Stage 7b silicon closure and the Linux bring-up bisect. None of these have their own commits yet — all accumulated into the "pre-Linux-bringup" working tree.
+
+### Stage 7c — Verilator Linux sim harness
+- **`rtl/soc/soc_tb_linux.sv`** (new). Linux-specific TB top: DDR-backed behavioural SRAM (`axil_bram_big`, 128 MB), AXI-UartLite at 0xC0000000, DDR DPI backdoor for preload (`ddr_dpi_write`).
+- **`rtl/mem/axi4_router_linux.sv`** (new). Behavioural router for the Linux TB, bigger than the 7a `axi4_router_1x2` — handles the DDR+MMIO+PLIC+CLINT address map.
+- **`rtl/mem/axil_bram_big.sv`** (new). Large behavioural BRAM for DDR replacement in sim.
+- **`sim/cpp/sim_linux.cpp`** (new). C++ harness parsing `+fw/+kernel/+dtb/+initrd/+bootrom/+timeout/+trace/+tracefrom/+traceuntil` plusargs; DDR DPI self-check; DPI-loaded memory; FST trace plumbing.
+- **`sim/Makefile`** — new `linux-build` target wiring the above.
+- **Phase 1 proof**: `ddr_hello` raw-binary runs from DDR via the sim (task #107).
+- **Phase 2 proof**: OpenSBI banner prints in sim (task #108).
+
+### Stage 7d — PLIC
+- **`rtl/soc/plic.sv`** (new). 32-source priority-based PLIC (M+S contexts), memory-mapped at 0x0C000000. Routed into `soc_top` and `soc_tb_linux`.
+- Task #97 completed.
+
+### Stage 7e — No-SD-card boot strategy
+- **`fpga/scripts/jtag_load.tcl`** (new). Stages fw_jump.bin, kernel Image, DTB, initrd into DDR over `jtag_axi`, writes a handshake packet at 0x47000000 (entry=0x40000000, dtb=0x42200000, magic=0xDEADBEEF), then releases the core.
+- **`fpga/scripts/jtag_bench.tcl`**, **`jtag_bench2.tcl`**, **`jtag_load_hello.tcl`**, **`uart_monitor.py`** — peripheral tooling for perf and UART capture.
+- **`sw/bootrom/bootrom.bin`** already existed from earlier; loaded at 0x80000000 (CPU reset vector) — it polls the magic at 0x47000000 then `jalr` into 0x40000000.
+- **axi_crossbar / jtag_axi IP** reconfigured to `NUM_SI=2` so the host JTAG path and the SoC can both drive the crossbar. Fixes the earlier "only one slave interface" collision (task #104).
+- Task #99 closed the strategy decision; task #105 closed the TCL; task #106 verified the whole flow in sim.
+- **Perf trap** logged separately (`project_jtag_axi_log_perf.md`): default hw_axi TCL prints the full WRITE DATA payload per burst — throttles to ~80 B/s. `set_msg_config -id {Labtoolstcl 44-481} -limit 1` takes it to ~300 KB/s.
+
+### Stage 7f — OpenSBI port
+- OpenSBI 1.4, `PLATFORM=generic`, `PLATFORM_RISCV_XLEN=32`, `PLATFORM_RISCV_ISA=rv32ima_zicsr_zifencei`, `PLATFORM_RISCV_ABI=ilp32`, **non-RVC** (the kernel is built without compressed instructions too — the xor-trick trap entry at 0x40000478 is `csrrw` as a 32-bit insn, not RVC).
+- `FW_TEXT_START=0x40000000`, `FW_JUMP_ADDR=0x40400000`, `FW_JUMP_FDT_ADDR=0x42200000`.
+- Task #100 closed; rebuild recipe with correct non-RVC/FW_TEXT_START captured in memory (`project_stage7g_fetch_squash_fix.md` notes the env).
+- Task #103 — rebuild without RVC + correct FW_TEXT_START — closed.
+
+### Tests
+- Regression suite was expanded to cover `rv32ua`, `rv32mi`, `rv32si` (task-level baseline captured in `project_riscv_tests_regression.md`). Stable at 79/82 PASS.
+
+## 2026-04-19/20 — Stage 7g: Linux silent-hang bisect
+
+This is the chronology of the bring-up work that led to the 2026-04-21 closure above. Left as a separate entry because each fix was a distinct root-cause investigation.
+
+### First stall: OpenSBI DDR ifetch race
+- **`rtl/soc/axi4_master.sv`** fetch race: `req_ready` went high on the same cycle `rsp_valid` pulsed → redundant fetch for a stale PC → poisoned next fetch. Fix: `req_ready = IDLE && !rsp_valid_q`. See `project_axi4_master_fetch_race.md`.
+
+### Second stall: PTW couldn't see DDR
+- The PTW port only reached SRAM. DDR-resident page-global-directory reads returned zero → persistent page-fault loop once the kernel walked into DDR-backed VAs. Fix: address-decode the PTW port inside `soc_top` and route DDR-range requests through `axi4_master`. See `project_ptw_ddr_routing.md`.
+
+### Third stall: MIP ownership split
+- Single `MIP_WRITABLE` mask let M-mode writes stomp STIP and S-mode writes stomp MTIP. Split into `MIP_M_WRITABLE=0x222` / `MIP_S_WRITABLE=0x002`.
+
+### Fourth stall: if_bad one-pulse
+- On a trap-commit cycle, a transient `is_bad` indication would latch a spurious fault response the next cycle after pc_q had updated. Gated to `if_bad_rsp_valid_q <= if_is_bad && !if_bad_rsp_valid_q`. This was the fix that got the kernel past `sched_clock`.
+
+### Fifth stall: stale Image (EFI MZ header)
+- `buildroot output/images/Image` had a stale EFI MZ header (`c.li s4,-13`, requires RVC). The freshly-built `arch/riscv/boot/Image` is plain `j +0xd4`. We boot the latter in sim (and must flash the latter to silicon). See `project_stage7g_rootcause_stale_image.md`.
+
+### Sixth stall: stale ifetch on trap redirect (the jump-to-0)
+- Final root cause for the OpenSBI trap storm at pc=0 — see the 2026-04-21 entry. Fixed by `fetch_inflight_q` / `fetch_squash_q` in `core_multicycle.sv`.
+
+### Residuals
+- The silicon-side "full chain live but kernel emits zero bytes" symptom (`project_stage7g_opensbi_linux_silent_hang.md`) is very likely the same ifetch-race family — a re-flashed bitstream carrying all five RTL fixes should clear it.
+
 ## 2026-04-19 — Stage 7b: MIG7 DDR3L bring-up bitstream closes
 
 ### Status

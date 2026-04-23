@@ -31,6 +31,7 @@ RTL_FILES := \
     $(RTL_DIR)/cache/dcache.sv \
     $(RTL_DIR)/soc/mmio.sv \
     $(RTL_DIR)/soc/clint.sv \
+    $(RTL_DIR)/soc/plic.sv \
     $(RTL_DIR)/soc/axi4_master.sv \
     $(RTL_DIR)/soc/soc_top.sv \
     $(RTL_DIR)/soc/soc_tb_top.sv
@@ -110,3 +111,69 @@ sim-c: build
 
 clean:
 	rm -rf $(OBJ_DIR) $(BUILD_DIR)/*.log $(BUILD_DIR)/*.trace $(BUILD_DIR)/*.vcd
+
+# ---------------------------------------------------------------------------
+# Linux sim (soc_tb_linux) — brings up OpenSBI + kernel in Verilator with a
+# large DDR-backed BRAM at 0x40000000 and AXI-UartLite at 0xC0000000. The
+# full boot memory map (fw_jump, kernel Image, DTB, initramfs) is preloaded
+# by the C++ harness via the DDR DPI backdoor before the first clock.
+# ---------------------------------------------------------------------------
+LINUX_TOP       := soc_tb_linux
+LINUX_OBJ_DIR   := $(BUILD_DIR)/obj_linux
+LINUX_BIN       := $(LINUX_OBJ_DIR)/V$(LINUX_TOP)
+
+LINUX_RTL_FILES := \
+    $(RTL_DIR)/core/defs.svh \
+    $(RTL_DIR)/core/alu.sv \
+    $(RTL_DIR)/core/imm_gen.sv \
+    $(RTL_DIR)/core/regfile.sv \
+    $(RTL_DIR)/core/csr.sv \
+    $(RTL_DIR)/core/mul_unit.sv \
+    $(RTL_DIR)/core/div_unit.sv \
+    $(RTL_DIR)/core/core_multicycle.sv \
+    $(RTL_DIR)/core/core_pipeline.sv \
+    $(RTL_DIR)/core/mmu.sv \
+    $(RTL_DIR)/core/pmp.sv \
+    $(RTL_DIR)/mem/sram_dp.sv \
+    $(RTL_DIR)/mem/axil_bram_slave.sv \
+    $(RTL_DIR)/mem/axil_bram_big.sv \
+    $(RTL_DIR)/mem/axil_uartlite_sim.sv \
+    $(RTL_DIR)/mem/axi4_router_linux.sv \
+    $(RTL_DIR)/cache/icache.sv \
+    $(RTL_DIR)/cache/dcache.sv \
+    $(RTL_DIR)/soc/mmio.sv \
+    $(RTL_DIR)/soc/clint.sv \
+    $(RTL_DIR)/soc/plic.sv \
+    $(RTL_DIR)/soc/axi4_master.sv \
+    $(RTL_DIR)/soc/soc_top.sv \
+    $(RTL_DIR)/soc/soc_tb_linux.sv
+
+LINUX_CPP_FILES := $(SIM_DIR)/cpp/sim_linux.cpp
+
+# Default: FST (more compact than VCD for long runs). Override FST=0 to use VCD.
+LINUX_TRACE_FLAGS ?= --trace-fst -CFLAGS "-DVM_TRACE_FST=1"
+
+LINUX_FLAGS := \
+    --cc --exe --build -j 0 \
+    $(LINUX_TRACE_FLAGS) \
+    --Mdir $(LINUX_OBJ_DIR) \
+    --top-module $(LINUX_TOP) \
+    -Wno-fatal \
+    -Wno-UNOPTFLAT -Wno-WIDTH \
+    -CFLAGS "-std=c++17 -O2 -Wall -I$(SIM_DIR)/cpp" \
+    $(VERILATOR_INC)
+
+ifeq ($(CORE),pipeline)
+LINUX_FLAGS += -DUSE_PIPELINE_CORE
+endif
+
+.PHONY: linux-build linux-clean
+
+linux-build: $(LINUX_BIN)
+
+$(LINUX_BIN): $(LINUX_RTL_FILES) $(LINUX_CPP_FILES)
+	@mkdir -p $(LINUX_OBJ_DIR)
+	verilator $(LINUX_FLAGS) $(filter-out %.svh,$(LINUX_RTL_FILES)) $(LINUX_CPP_FILES)
+
+linux-clean:
+	rm -rf $(LINUX_OBJ_DIR)

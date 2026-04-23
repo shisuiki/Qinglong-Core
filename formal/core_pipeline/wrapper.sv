@@ -29,6 +29,7 @@ module rvfi_wrapper (
     (* keep *) `rvformal_rand_reg        ext_mti;
     (* keep *) `rvformal_rand_reg        ext_msi;
     (* keep *) `rvformal_rand_reg        ext_mei;
+    (* keep *) `rvformal_rand_reg        ext_sei;
 
     // ---- observable outputs (kept so they appear in the VCD on cex) ----
     (* keep *) wire        ifetch_req_valid;
@@ -95,6 +96,7 @@ module rvfi_wrapper (
         .dmem_rsp_ready   (dmem_rsp_ready),
 
         .ext_mti (ext_mti), .ext_msi (ext_msi), .ext_mei (ext_mei),
+        .ext_sei (ext_sei),
 
         .commit_valid    (commit_valid),
         .commit_pc       (commit_pc),
@@ -135,18 +137,26 @@ module rvfi_wrapper (
     // so the actual fetched instruction word the solver picks IS the insn
     // under test.
 
-    // For the first-pass insn checks: exclude fault/interrupt paths. These
-    // have their own checks (bus_imem_fault, bus_dmem_fault, future CSR
-    // work) and would otherwise let the solver turn any ADDI into a trap
-    // via ifetch_rsp_fault, masking the arith behaviour we're proving.
+    // Symbolic fault / interrupt inputs exercise trap-entry paths.
+    //
+    // Prerequisites in core_pipeline_rvfi.svh (landed 2026-04-20):
+    //   - rvfi_valid suppressed on async-IRQ squashes (rvfi_async_retire)
+    //   - rvfi_trap masks out cause[31]=1 (interrupts use rvfi_intr instead)
+    //   - rvfi_insn forced to 0 on fetch-fault retirements so opcode decode
+    //     misses every per-insn spec predicate
+    //
+    // dmem bus faults are masked off here — by upstream riscv-formal design,
+    // those belong to the separate `bus_dmem_fault_check` (different wrapper
+    // config), not the per-insn checks. Per-insn spec models only encode ISA
+    // trap conditions (misalignment, misa mismatch); LW/SW etc. have no spec
+    // trap for bus fault. Attempting to leave dmem_rsp_fault symbolic fails
+    // every memory-touching insn_* check.
+    //
+    // ifetch_rsp_fault and the four external IRQ inputs ARE left symbolic —
+    // the RVFI sanitization fields above handle them cleanly.
     always @* begin
-        assume (!ifetch_rsp_fault);
-        assume (!ifetch_rsp_pagefault);
         assume (!dmem_rsp_fault);
         assume (!dmem_rsp_pagefault);
-        assume (!ext_mti);
-        assume (!ext_msi);
-        assume (!ext_mei);
     end
 
 endmodule
