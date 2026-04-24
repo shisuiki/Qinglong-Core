@@ -42,10 +42,10 @@
     <dci_cascade>0</dci_cascade>
     <Controller number="0" >
         <MemoryDevice>DDR3_SDRAM/Components/MT41K64M16XX-125</MemoryDevice>
-        <TimePeriod>3000</TimePeriod>
+        <TimePeriod>3250</TimePeriod>
         <VccAuxIO>1.8V</VccAuxIO>
         <PHYRatio>2:1</PHYRatio>
-        <InputClkFreq>333.333</InputClkFreq>
+        <InputClkFreq>307.692</InputClkFreq>
         <UIExtraClocks>0</UIExtraClocks>
         <MMCMClkOut0>1.000</MMCMClkOut0>
         <MMCMClkOut1>1</MMCMClkOut1>

@@ -131,7 +131,7 @@ module axi_hello_top #(
         .DIVCLK_DIVIDE     (1),
         .CLKFBOUT_MULT_F   (10.000),    // VCO = 1000 MHz
         .CLKFBOUT_PHASE    (0.000),
-        .CLKOUT0_DIVIDE_F  (3.000),     // 1000 / 3   ≈ 333.333 MHz
+        .CLKOUT0_DIVIDE_F  (3.250),     // 1000 / 3.25 = 307.692 MHz (MIG sys_clk, TimePeriod=3250ps → 615 MT/s DDR). Max granular derate within Spartan-7 -1 MIG range 3000-3300ps AND MMCM 0.125 granularity.
         .CLKOUT0_PHASE     (0.000),
         .CLKOUT0_DUTY_CYCLE(0.500),
         .CLKOUT1_DIVIDE    (5),         // 1000 / 5   = 200 MHz (IDELAYCTRL)

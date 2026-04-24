@@ -249,9 +249,11 @@ if {[llength $verilog_defines] > 0} {
 write_checkpoint -force post_synth.dcp
 report_utilization -file post_synth_util.rpt
 
-opt_design
-place_design
-route_design
+opt_design -directive Explore
+place_design -directive Explore
+phys_opt_design -directive Explore
+route_design -directive Explore
+phys_opt_design -directive Explore
 
 write_checkpoint -force post_route.dcp
 

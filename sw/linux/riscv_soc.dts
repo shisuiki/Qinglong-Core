@@ -7,12 +7,16 @@
     model          = "RealDigital Urbana RV32IMA SoC";
 
     chosen {
-        bootargs       = "console=ttyUL0,115200 earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug nosoftlockup nmi_watchdog=0";
+        bootargs       = "earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug nosoftlockup nmi_watchdog=0 initcall_debug ignore_loglevel clocksource=jiffies rodata=off init_on_free=off init_on_alloc=off";
         stdout-path    = "/soc/serial@c0000000";
-        /* rootfs.cpio (uncompressed, ~20 MB) staged at 0x43000000; DDR
-         * ends at 0x48000000 so cover the full uncompressed range. */
+        /* rootfs.cpio is exactly 20610560 B = 0x013A7E00 at 0x43000000.
+         * initrd-end must match CPIO size EXACTLY: too big → unpack_to_rootfs
+         * reads uninitialized DDR past archive → "invalid magic at start of
+         * compressed archive" → no rootfs. Too small → archive truncated,
+         * /sbin/init missing silently → prepare_namespace → "Can't open
+         * blockdev" hang. Correct end = 0x43000000 + 0x013A7E00 = 0x443A7E00. */
         linux,initrd-start = <0x43000000>;
-        linux,initrd-end   = <0x44500000>;
+        linux,initrd-end   = <0x443A7E00>;
     };
 
     aliases {
