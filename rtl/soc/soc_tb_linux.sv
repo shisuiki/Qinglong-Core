@@ -73,6 +73,10 @@ module soc_tb_linux (
     logic [1:0]  m_axi_rresp;
     logic        m_axi_rlast;
 
+    // Driven by axil_uartlite_sim's irq_o output (bottom of file). When CTRL.IE=1,
+    // this is high, matching silicon's level-triggered IRQ on TX_EMPTY+IE.
+    logic        uart_irq_sim;
+
     // Reset vector matches silicon: BootROM in SRAM polls the handshake word
     // in DDR and jumps to OpenSBI. Harness preloads SRAM + DDR + handshake
     // via DPI, then releases reset — exactly what JTAG-to-AXI does on FPGA.
@@ -103,7 +107,7 @@ module soc_tb_linux (
         .m_axi_rid(m_axi_rid),         .m_axi_rdata(m_axi_rdata),
         .m_axi_rresp(m_axi_rresp),     .m_axi_rlast(m_axi_rlast),
 
-        .uart_irq_i(1'b0),
+        .uart_irq_i(uart_irq_sim),
 
         .commit_valid(commit_valid), .commit_pc(commit_pc), .commit_insn(commit_insn),
         .commit_rd_wen(commit_rd_wen), .commit_rd_addr(commit_rd_addr), .commit_rd_data(commit_rd_data),
@@ -215,7 +219,8 @@ module soc_tb_linux (
         .s_axil_arvalid(s1_ar_v),  .s_axil_arready(s1_ar_r),
         .s_axil_araddr(s1_ar_a),   .s_axil_arprot(s1_ar_p),
         .s_axil_rvalid(s1_r_v),    .s_axil_rready(s1_r_r),
-        .s_axil_rdata(s1_r_d),     .s_axil_rresp(s1_r_resp)
+        .s_axil_rdata(s1_r_d),     .s_axil_rresp(s1_r_resp),
+        .irq_o(uart_irq_sim)
     );
 
 endmodule

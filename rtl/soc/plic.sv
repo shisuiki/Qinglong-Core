@@ -54,7 +54,15 @@ module plic #(
     input  logic [NUM_SOURCES-1:0] sources_i,
 
     // One IRQ output per context.
-    output logic [NUM_CTX-1:0]     irq_o
+    output logic [NUM_CTX-1:0]     irq_o,
+
+    // Debug taps for ILA (silicon IRQ-path diagnosis). Sized to the parameters
+    // above; the wrapper selects the S-mode context slice for the ILA probes.
+    output logic [NUM_SOURCES-1:0] dbg_pending,
+    output logic [NUM_SOURCES-1:0] dbg_inflight,
+    output logic [NUM_SOURCES-1:0] dbg_enable_s,
+    output logic [2:0]             dbg_threshold_s,
+    output logic [$clog2(NUM_SOURCES+1)-1:0] dbg_claimed_src_s
 );
 
     localparam int PRIO_W = 3;  // 3-bit priority (0..7); 0 disables
@@ -124,6 +132,13 @@ module plic #(
             irq_o[c] = (pick_best_src(c) != '0);
         end
     end
+
+    // ---------- Debug taps (S-mode context slice) ----------
+    assign dbg_pending       = pending_q;
+    assign dbg_inflight      = inflight_q;
+    assign dbg_enable_s      = (NUM_CTX > 1) ? enable_q[1]    : '0;
+    assign dbg_threshold_s   = (NUM_CTX > 1) ? threshold_q[1] : '0;
+    assign dbg_claimed_src_s = (NUM_CTX > 1) ? claimed_src_q[1] : '0;
 
     // ---------- bus ----------
     assign req_ready = 1'b1;

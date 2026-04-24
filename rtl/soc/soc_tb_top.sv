@@ -161,6 +161,7 @@ module soc_tb_top (
     );
 
     // ---------- slave 0: UartLite stub @ 0xC000_0000 ----------
+    logic uart_irq_unused_tb_top;
     axil_uartlite_sim u_ul (
         .clk(clk), .rst(rst),
         .s_axil_awvalid(s0_aw_v),  .s_axil_awready(s0_aw_r),
@@ -172,7 +173,8 @@ module soc_tb_top (
         .s_axil_arvalid(s0_ar_v),  .s_axil_arready(s0_ar_r),
         .s_axil_araddr(s0_ar_a),   .s_axil_arprot(s0_ar_p),
         .s_axil_rvalid(s0_r_v),    .s_axil_rready(s0_r_r),
-        .s_axil_rdata(s0_r_d),     .s_axil_rresp(s0_r_resp)
+        .s_axil_rdata(s0_r_d),     .s_axil_rresp(s0_r_resp),
+        .irq_o(uart_irq_unused_tb_top)
     );
 
     // ---------- slave 1: BRAM @ 0xC000_1000 ----------

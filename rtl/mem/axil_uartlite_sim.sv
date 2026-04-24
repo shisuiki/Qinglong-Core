@@ -5,10 +5,15 @@
 // Register offsets (low 4 addr bits):
 //   0x00  RX_FIFO  (RO)  — always empty (returns 0)
 //   0x04  TX_FIFO  (WO)  — byte is emitted to stdout immediately
-//   0x08  STAT     (RO)  — always 0 (TX not full, RX not valid)
-//   0x0C  CTRL     (WO)  — accepted, ignored
+//   0x08  STAT     (RO)  — TX_EMPTY=1 (bit 2) once IRQ-fidelity on, 0 before
+//   0x0C  CTRL     (WO)  — IE bit (0x10) tracked for irq_o drive
 //
-// Fidelity vs real IP: no FIFOs, no RX, no interrupt. That's fine for bringup.
+// Fidelity vs real IP: no FIFOs, no RX. IRQ output added (2026-04-24) to let
+// sim exercise S-mode external-IRQ delivery via PLIC — matches silicon's
+// behavior where the level-triggered IRQ asserts whenever CTRL.IE=1 AND
+// TX FIFO is empty (or RX valid). Sim has no FIFO so TX is always empty,
+// meaning once the driver writes IE=1 the IRQ stays high forever — which is
+// exactly the condition that breaks silicon's S-mode IRQ path.
 
 module axil_uartlite_sim (
     input  logic        clk,
@@ -36,8 +41,14 @@ module axil_uartlite_sim (
     output logic        s_axil_rvalid,
     input  logic        s_axil_rready,
     output logic [31:0] s_axil_rdata,
-    output logic [1:0]  s_axil_rresp
+    output logic [1:0]  s_axil_rresp,
+
+    output logic        irq_o
 );
+
+    // CTRL.IE bit (0x10 = bit 4). Sticky until next CTRL write.
+    logic ctrl_ie_q;
+    assign irq_o = ctrl_ie_q;   // TX always "empty" in sim → IRQ high whenever IE=1
 
     // ---- Write side ----
     logic        aw_hs_q, w_hs_q;
@@ -52,9 +63,10 @@ module axil_uartlite_sim (
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            aw_hs_q  <= 1'b0;
-            w_hs_q   <= 1'b0;
-            bvalid_q <= 1'b0;
+            aw_hs_q   <= 1'b0;
+            w_hs_q    <= 1'b0;
+            bvalid_q  <= 1'b0;
+            ctrl_ie_q <= 1'b0;
         end else begin
             if (s_axil_awvalid && s_axil_awready) begin
                 awaddr_q <= s_axil_awaddr;
@@ -72,7 +84,10 @@ module axil_uartlite_sim (
                     $write("%c", wdata_q[7:0]);
                     $fflush;
                 end
-                // Other offsets are silently accepted.
+                // Track CTRL.IE (bit 4) on writes to CTRL (offset 0x0c).
+                if (awaddr_q[3:0] == 4'hc && wstrb_q[0]) begin
+                    ctrl_ie_q <= wdata_q[4];
+                end
                 bvalid_q <= 1'b1;
             end
 

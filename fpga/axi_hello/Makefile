@@ -56,6 +56,16 @@ else
 USE_DCACHE :=
 endif
 
+# ILA=1 enables the silicon debug ILA on the S-mode external IRQ path (see
+# rtl/fpga/soc_ila_probes.sv + build_axi_hello.tcl). Adds the Xilinx ila_0
+# IP and ~18 BRAMs. When unset, soc_ila_probes is elided entirely.
+ILA ?=
+ifeq ($(ILA),1)
+USE_ILA := 1
+else
+USE_ILA :=
+endif
+
 .PHONY: synth prog clean mem
 
 mem: $(MEM)
@@ -71,6 +81,7 @@ synth: $(MEM)
 	    USE_PIPELINE_CORE=$(USE_PIPELINE_CORE) \
 	    USE_ICACHE=$(USE_ICACHE) \
 	    USE_DCACHE=$(USE_DCACHE) \
+	    USE_ILA=$(USE_ILA) \
 	    vivado $(VIVADO_BATCH_FLAGS) \
 	        -log $(BUILD_DIR)/vivado.log \
 	        -journal $(BUILD_DIR)/vivado.jou \

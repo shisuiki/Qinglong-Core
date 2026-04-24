@@ -747,6 +747,12 @@ module soc_top #(
     );
 
     // ---------- PLIC (Stage 7d) ----------
+    logic [PLIC_NUM_SOURCES-1:0] plic_dbg_pending;
+    logic [PLIC_NUM_SOURCES-1:0] plic_dbg_inflight;
+    logic [PLIC_NUM_SOURCES-1:0] plic_dbg_enable_s;
+    logic [2:0]                  plic_dbg_threshold_s;
+    logic [$clog2(PLIC_NUM_SOURCES+1)-1:0] plic_dbg_claimed_src_s;
+
     plic #(
         .NUM_SOURCES(PLIC_NUM_SOURCES),
         .NUM_CTX    (PLIC_NUM_CTX)
@@ -757,8 +763,45 @@ module soc_top #(
         .req_ready(plic_req_ready),
         .rsp_valid(plic_rsp_valid), .rsp_rdata(plic_rsp_rdata), .rsp_fault(plic_rsp_fault),
         .sources_i(plic_sources),
-        .irq_o    (plic_irq)
+        .irq_o    (plic_irq),
+        .dbg_pending      (plic_dbg_pending),
+        .dbg_inflight     (plic_dbg_inflight),
+        .dbg_enable_s     (plic_dbg_enable_s),
+        .dbg_threshold_s  (plic_dbg_threshold_s),
+        .dbg_claimed_src_s(plic_dbg_claimed_src_s)
     );
+
+`ifdef FPGA_DEBUG_ILA
+    // ILA capture of the S-mode external IRQ path. Signals chosen to answer:
+    //   1. does uart_irq_i assert after the first CTRL.IE=1 write?
+    //   2. does plic.pending[1] latch and plic.irq_o[1] (ext_sei) go high?
+    //   3. does the core take the trap? what commit_pc/commit_cause?
+    //   4. what does the kernel read from PLIC.claim, and what does it write
+    //      back on PLIC.complete?
+    //   5. does inflight_q clear so the next edge re-pends?
+    soc_ila_probes u_ila (
+        .clk               (clk),
+        .uart_irq_i        (uart_irq_i),
+        .plic_sources      (plic_sources),
+        .plic_irq          (plic_irq),
+        .plic_pending      (plic_dbg_pending),
+        .plic_inflight     (plic_dbg_inflight),
+        .plic_enable_s     (plic_dbg_enable_s),
+        .plic_threshold_s  (plic_dbg_threshold_s),
+        .plic_claimed_src_s(plic_dbg_claimed_src_s),
+        .plic_req_valid    (plic_req_valid),
+        .plic_req_wen      (plic_req_wen),
+        .plic_req_addr     (plic_req_addr[15:0]),
+        .plic_req_wdata    (plic_req_wdata),
+        .plic_rsp_valid    (plic_rsp_valid),
+        .plic_rsp_rdata    (plic_rsp_rdata),
+        .commit_valid      (commit_valid),
+        .commit_pc         (commit_pc),
+        .commit_trap       (commit_trap),
+        .commit_cause      (commit_cause[5:0]),
+        .priv_mode         (mmu_priv_w)
+    );
+`endif
 
     // ---------- AXI arbiter: {PTW, ifetch, dmem} → single axi4_master ----------
     // Three clients share the single-outstanding axi4_master. PTW gets top

@@ -197,12 +197,69 @@ if {[file exists $mig_rtl]} {
 synth_ip [get_ips mig_ddr3_0]
 
 # -----------------------------------------------------------------------------
+# ila_0 — debug core for silicon-only S-mode IRQ-path diagnosis. Only
+# generated and instantiated when USE_ILA=1; otherwise skipped and the
+# soc_ila_probes instance inside soc_top is elided by the `FPGA_DEBUG_ILA
+# ifdef. Probe layout matches rtl/fpga/soc_ila_probes.sv: 19 probes, widths
+# 1/4/2/4/4/4/3/3/1/1/16/32/1/32/1/32/1/6/2.
+# -----------------------------------------------------------------------------
+set use_ila 0
+if {[info exists ::env(USE_ILA)] && $::env(USE_ILA) ne "" && $::env(USE_ILA) ne "0"} {
+    set use_ila 1
+    puts "==> build_axi_hello: ila        = on (USE_ILA)"
+}
+
+if {$use_ila} {
+    create_ip -vlnv xilinx.com:ip:ila:6.2 -module_name ila_0 -dir $ip_dir
+    set_property -dict [list \
+        CONFIG.C_NUM_OF_PROBES     {19}   \
+        CONFIG.C_DATA_DEPTH        {4096} \
+        CONFIG.C_INPUT_PIPE_STAGES {1}    \
+        CONFIG.C_TRIGIN_EN         {false} \
+        CONFIG.C_TRIGOUT_EN        {false} \
+        CONFIG.C_EN_STRG_QUAL      {1}    \
+        CONFIG.C_ADV_TRIGGER       {true} \
+        CONFIG.C_PROBE0_WIDTH      {1}    \
+        CONFIG.C_PROBE1_WIDTH      {4}    \
+        CONFIG.C_PROBE2_WIDTH      {2}    \
+        CONFIG.C_PROBE3_WIDTH      {4}    \
+        CONFIG.C_PROBE4_WIDTH      {4}    \
+        CONFIG.C_PROBE5_WIDTH      {4}    \
+        CONFIG.C_PROBE6_WIDTH      {3}    \
+        CONFIG.C_PROBE7_WIDTH      {3}    \
+        CONFIG.C_PROBE8_WIDTH      {1}    \
+        CONFIG.C_PROBE9_WIDTH      {1}    \
+        CONFIG.C_PROBE10_WIDTH     {16}   \
+        CONFIG.C_PROBE11_WIDTH     {32}   \
+        CONFIG.C_PROBE12_WIDTH     {1}    \
+        CONFIG.C_PROBE13_WIDTH     {32}   \
+        CONFIG.C_PROBE14_WIDTH     {1}    \
+        CONFIG.C_PROBE15_WIDTH     {32}   \
+        CONFIG.C_PROBE16_WIDTH     {1}    \
+        CONFIG.C_PROBE17_WIDTH     {6}    \
+        CONFIG.C_PROBE18_WIDTH     {2}    \
+    ] [get_ips ila_0]
+    generate_target {synthesis simulation} [get_ips ila_0]
+    synth_ip [get_ips ila_0]
+}
+
+# -----------------------------------------------------------------------------
 # Source RTL
 # -----------------------------------------------------------------------------
 foreach f $src_list {
     puts "==> build_axi_hello: read_verilog -sv $f"
     read_verilog -sv $f
 }
+
+# soc_ila_probes.sv instantiates ila_0 (generated above only when USE_ILA=1).
+# Reading it unconditionally would leave ila_0 as an undefined cell when ILA=0
+# — Vivado tolerates unused modules but not unresolved cells during elaboration.
+if {$use_ila} {
+    set ila_wrap [file join $repo_dir rtl fpga soc_ila_probes.sv]
+    puts "==> build_axi_hello: read_verilog -sv $ila_wrap"
+    read_verilog -sv $ila_wrap
+}
+
 read_xdc $src_xdc
 
 read_ip [file join $ip_dir axi_uartlite_0           axi_uartlite_0.xci]
@@ -211,6 +268,9 @@ read_ip [file join $ip_dir jtag_axi_0               jtag_axi_0.xci]
 read_ip [file join $ip_dir axi_protocol_converter_0 axi_protocol_converter_0.xci]
 read_ip [file join $ip_dir axi_clock_converter_0    axi_clock_converter_0.xci]
 read_ip [file join $ip_dir mig_ddr3_0               mig_ddr3_0.xci]
+if {$use_ila} {
+    read_ip [file join $ip_dir ila_0                ila_0.xci]
+}
 
 set use_pipeline 0
 if {[info exists ::env(USE_PIPELINE_CORE)] && $::env(USE_PIPELINE_CORE) ne "" && $::env(USE_PIPELINE_CORE) ne "0"} {
@@ -235,6 +295,7 @@ set verilog_defines [list]
 if {$use_pipeline} { lappend verilog_defines USE_PIPELINE_CORE }
 if {$use_icache}   { lappend verilog_defines USE_ICACHE }
 if {$use_dcache}   { lappend verilog_defines USE_DCACHE }
+if {$use_ila}      { lappend verilog_defines FPGA_DEBUG_ILA }
 
 if {[llength $verilog_defines] > 0} {
     set verilog_define_args [list]
