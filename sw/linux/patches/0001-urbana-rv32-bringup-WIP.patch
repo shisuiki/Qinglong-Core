@@ -1,0 +1,370 @@
+Subject: [PATCH] urbana rv32 silicon bringup WIP
+
+Combined diff for Linux 6.6.32 against pristine for the Urbana RV32IMA SoC.
+
+Includes:
+  - arch/riscv/kernel/process.c: start_thread regs->status |= SR_SUM (root-cause fix)
+  - arch/riscv/kernel/head.S: permanent SUM=1 setup (band-aid; subsumable)
+  - arch/riscv/kernel/entry.S: preserve SUM on trap entry (band-aid; subsumable)
+  - arch/riscv/lib/uaccess.S: neutered SUM toggles (band-aid; subsumable)
+  - arch/riscv/include/asm/uaccess.h: neutered SUM toggles (band-aid; subsumable)
+  - init/main.c: kernel_init pr_emerg bisection printks (debug; remove)
+
+---
+--- a/arch/riscv/kernel/process.c	2024-05-25 14:22:56.000000000 +0000
++++ b/arch/riscv/kernel/process.c	2026-04-25 00:38:58.789075251 +0000
+@@ -112,7 +112,12 @@
+ void start_thread(struct pt_regs *regs, unsigned long pc,
+ 	unsigned long sp)
+ {
+-	regs->status = SR_PIE;
++	/* URBANA: keep SR_SUM in regs->status so that on every transition
++	 * back to user (csrw STATUS in ret_from_exception, then sret),
++	 * the kernel-side sstatus retains SUM=1. Otherwise the first
++	 * transition to user clears SUM permanently and copy_to_user/
++	 * copy_from_user load-page-fault on every syscall. */
++	regs->status = SR_PIE | SR_SUM;
+ 	if (has_fpu()) {
+ 		regs->status |= SR_FS_INITIAL;
+ 		/*
+--- a/arch/riscv/kernel/head.S	2024-05-25 14:22:56.000000000 +0000
++++ b/arch/riscv/kernel/head.S	2026-04-24 21:32:32.535576016 +0000
+@@ -147,6 +147,16 @@
+ 	li t0, SR_FS_VS
+ 	csrc CSR_STATUS, t0
+ 
++	/*
++	 * URBANA: permanently enable SSTATUS.SUM. The SoC has a silicon-only
++	 * MMU bug where a csr write to sstatus corrupts the subsequent
++	 * kernel-stack TLB entry (cause=0x0d on reload after
++	 * __clear_user / copy_to_user). Setting SUM once here lets
++	 * uaccess.S skip per-call toggles. Remove once the RTL is fixed.
++	 */
++	li t0, SR_SUM
++	csrs CSR_STATUS, t0
++
+ 	/* Set trap vector to spin forever to help debug */
+ 	la a3, .Lsecondary_park
+ 	csrw CSR_TVEC, a3
+@@ -241,6 +251,16 @@
+ 	li t0, SR_FS_VS
+ 	csrc CSR_STATUS, t0
+ 
++	/*
++	 * URBANA: permanently enable SSTATUS.SUM. The SoC has a silicon-only
++	 * MMU bug where a csr write to sstatus corrupts the subsequent
++	 * kernel-stack TLB entry (cause=0x0d on reload after
++	 * __clear_user / copy_to_user). Setting SUM once here lets
++	 * uaccess.S skip per-call toggles. Remove once the RTL is fixed.
++	 */
++	li t0, SR_SUM
++	csrs CSR_STATUS, t0
++
+ #ifdef CONFIG_RISCV_BOOT_SPINWAIT
+ 	li t0, CONFIG_NR_CPUS
+ 	blt a0, t0, .Lgood_cores
+--- a/arch/riscv/kernel/entry.S	2024-05-25 14:22:56.000000000 +0000
++++ b/arch/riscv/kernel/entry.S	2026-04-24 21:48:06.203998802 +0000
+@@ -49,13 +49,11 @@
+ 	save_from_x6_to_x31
+ 
+ 	/*
+-	 * Disable user-mode memory access as it should only be set in the
+-	 * actual user copy routines.
+-	 *
+-	 * Disable the FPU/Vector to detect illegal usage of floating point
+-	 * or vector in kernel space.
++	 * URBANA: preserve SUM on trap entry. The SoC's MMU corrupts the
++	 * kernel-stack TLB entry on csr writes that clear/set SUM, so we
++	 * keep SUM set globally (see head.S) and only clear FPU/Vector here.
+ 	 */
+-	li t0, SR_SUM | SR_FS_VS
++	li t0, SR_FS_VS
+ 
+ 	REG_L s0, TASK_TI_USER_SP(tp)
+ 	csrrc s1, CSR_STATUS, t0
+--- a/arch/riscv/lib/uaccess.S	2024-05-25 14:22:56.000000000 +0000
++++ b/arch/riscv/lib/uaccess.S	2026-04-24 21:33:05.678329516 +0000
+@@ -13,9 +13,12 @@
+ ENTRY(__asm_copy_to_user)
+ ENTRY(__asm_copy_from_user)
+ 
+-	/* Enable access to user memory */
++	/* URBANA: SUM is set permanently in head.S; skip the toggle to avoid
++	 * the silicon MMU bug that corrupts the kernel-stack TLB on
++	 * sstatus csr writes. t6 is still written so the fixup path's csrc
++	 * reference is defined. */
+ 	li t6, SR_SUM
+-	csrs CSR_STATUS, t6
++	/* csrs CSR_STATUS, t6 */
+ 
+ 	/*
+ 	 * Save the terminal address which will be used to compute the number
+@@ -170,15 +173,15 @@
+ 	bltu	a0, t0, 4b	/* t0 - end of dst */
+ 
+ .Lout_copy_user:
+-	/* Disable access to user memory */
+-	csrc CSR_STATUS, t6
++	/* URBANA: SUM stays enabled permanently; skip csrc toggle. */
++	/* csrc CSR_STATUS, t6 */
+ 	li	a0, 0
+ 	ret
+ 
+ 	/* Exception fixup code */
+ 10:
+-	/* Disable access to user memory */
+-	csrc CSR_STATUS, t6
++	/* URBANA: SUM stays enabled permanently; skip csrc toggle. */
++	/* csrc CSR_STATUS, t6 */
+ 	sub a0, t5, a0
+ 	ret
+ ENDPROC(__asm_copy_to_user)
+@@ -189,9 +192,9 @@
+ 
+ ENTRY(__clear_user)
+ 
+-	/* Enable access to user memory */
++	/* URBANA: SUM is set permanently in head.S; skip the toggle. */
+ 	li t6, SR_SUM
+-	csrs CSR_STATUS, t6
++	/* csrs CSR_STATUS, t6 */
+ 
+ 	add a3, a0, a1
+ 	addi t0, a0, SZREG-1
+@@ -212,8 +215,8 @@
+ 	bltu a0, a3, 5f
+ 
+ 3:
+-	/* Disable access to user memory */
+-	csrc CSR_STATUS, t6
++	/* URBANA: SUM stays enabled permanently; skip csrc toggle. */
++	/* csrc CSR_STATUS, t6 */
+ 	li a0, 0
+ 	ret
+ 4: /* Edge case: unalignment */
+@@ -229,8 +232,8 @@
+ 
+ 	/* Exception fixup code */
+ 11:
+-	/* Disable access to user memory */
+-	csrc CSR_STATUS, t6
++	/* URBANA: SUM stays enabled permanently; skip csrc toggle. */
++	/* csrc CSR_STATUS, t6 */
+ 	sub a0, a3, a0
+ 	ret
+ ENDPROC(__clear_user)
+--- a/arch/riscv/include/asm/uaccess.h	2024-05-25 14:22:56.000000000 +0000
++++ b/arch/riscv/include/asm/uaccess.h	2026-04-24 21:47:19.241915639 +0000
+@@ -23,10 +23,13 @@
+ #include <asm/asm.h>
+ #include <asm-generic/access_ok.h>
+ 
++/* URBANA: SUM is set permanently in head.S to dodge a silicon MMU bug
++ * where csr writes to sstatus corrupt the kernel-stack TLB entry. These
++ * macros are neutered to a pure compiler barrier; the SUM bit stays set. */
+ #define __enable_user_access()							\
+-	__asm__ __volatile__ ("csrs sstatus, %0" : : "r" (SR_SUM) : "memory")
++	__asm__ __volatile__ ("" : : : "memory")
+ #define __disable_user_access()							\
+-	__asm__ __volatile__ ("csrc sstatus, %0" : : "r" (SR_SUM) : "memory")
++	__asm__ __volatile__ ("" : : : "memory")
+ 
+ /*
+  * The exception table consists of pairs of addresses: the first is the
+--- a/init/main.c	2024-05-25 14:22:56.000000000 +0000
++++ b/init/main.c	2026-04-24 17:06:07.789138031 +0000
+@@ -93,6 +93,24 @@
+ #include <linux/integrity.h>
+ #include <linux/proc_ns.h>
+ #include <linux/io.h>
++#ifdef CONFIG_RISCV_SBI
++#include <asm/sbi.h>
++#endif
++
++/* SILICON_DEBUG: file-scope SBI legacy console-putchar probe (EID=1). Bypasses
++ * all Linux console subsystem — traps to M-mode (OpenSBI) which writes UART
++ * directly. Used to bisect kernel_init_freeable tail hangs on Urbana silicon. */
++static __always_inline void __sil_putc(char c)
++{
++	register long a0 asm("a0") = (long)c;
++	register long a7 asm("a7") = 1L;
++	asm volatile ("ecall" : "+r"(a0) : "r"(a7) : "memory");
++}
++static __always_inline void __sil_puts(const char *s)
++{
++	while (*s) { __sil_putc(*s++); }
++}
++
+ #include <linux/cache.h>
+ #include <linux/rodata_test.h>
+ #include <linux/jump_label.h>
+@@ -1350,14 +1368,18 @@
+ 	const char *const *p;
+ 
+ 	argv_init[0] = init_filename;
+-	pr_info("Run %s as init process\n", init_filename);
++	pr_emerg("KINIT_DBG: Run %s as init process\n", init_filename);
+ 	pr_debug("  with arguments:\n");
+ 	for (p = argv_init; *p; p++)
+ 		pr_debug("    %s\n", *p);
+ 	pr_debug("  with environment:\n");
+ 	for (p = envp_init; *p; p++)
+ 		pr_debug("    %s\n", *p);
+-	return kernel_execve(init_filename, argv_init, envp_init);
++	{
++		int __rip_ret = kernel_execve(init_filename, argv_init, envp_init);
++		pr_emerg("KINIT_DBG: kernel_execve returned %d\n", __rip_ret);
++		return __rip_ret;
++	}
+ }
+ 
+ static int try_to_run_init_process(const char *init_filename)
+@@ -1441,32 +1463,61 @@
+ 	 */
+ 	wait_for_completion(&kthreadd_done);
+ 
++	pr_emerg("KINIT_DBG: before kernel_init_freeable\n");
+ 	kernel_init_freeable();
+-	/* need to finish all async __init code before freeing the memory */
+-	async_synchronize_full();
++	/* SILICON_DEBUG: Inline SBI legacy console-putchar ecall (EID=1). This
++	 * traps to M-mode (OpenSBI) which writes the byte directly to UART.
++	 * Bypasses all Linux console subsystem. */
++#define __SIL_PUTC(c) do {                                          \
++		register long a0 asm("a0") = (long)(c);             \
++		register long a7 asm("a7") = 1L;                    \
++		asm volatile ("ecall"                               \
++			: "+r"(a0)                                  \
++			: "r"(a7)                                   \
++			: "memory");                                \
++	} while (0)
++#define __SIL_PUTS(s) do {                                          \
++		const char *__p = (s);                              \
++		while (*__p) { __SIL_PUTC(*__p); __p++; }           \
++	} while (0)
++
++	__SIL_PUTS("\nSBI_PUT: A (kernel_init_freeable returned)\n");
++	pr_emerg("KINIT_DBG: after kernel_init_freeable\n");
+ 
+ 	system_state = SYSTEM_FREEING_INITMEM;
+ 	kprobe_free_init_mem();
++	pr_emerg("KINIT_DBG: after kprobe_free_init_mem\n");
+ 	ftrace_free_init_mem();
++	pr_emerg("KINIT_DBG: after ftrace_free_init_mem\n");
+ 	kgdb_free_init_mem();
++	pr_emerg("KINIT_DBG: after kgdb_free_init_mem\n");
+ 	exit_boot_config();
++	pr_emerg("KINIT_DBG: after exit_boot_config, before free_initmem\n");
+ 	free_initmem();
++	pr_emerg("KINIT_DBG: after free_initmem, before mark_readonly\n");
+ 	mark_readonly();
++	pr_emerg("KINIT_DBG: after mark_readonly, before pti_finalize\n");
+ 
+ 	/*
+ 	 * Kernel mappings are now finalized - update the userspace page-table
+ 	 * to finalize PTI.
+ 	 */
+ 	pti_finalize();
++	pr_emerg("KINIT_DBG: after pti_finalize\n");
+ 
+ 	system_state = SYSTEM_RUNNING;
+ 	numa_default_policy();
++	pr_emerg("KINIT_DBG: after numa_default_policy, before rcu_end_inkernel_boot\n");
+ 
+ 	rcu_end_inkernel_boot();
++	pr_emerg("KINIT_DBG: after rcu_end_inkernel_boot, before do_sysctl_args\n");
+ 
+ 	do_sysctl_args();
++	pr_emerg("KINIT_DBG: after do_sysctl_args, ramdisk_execute_command=%s\n",
++		 ramdisk_execute_command ? ramdisk_execute_command : "(null)");
+ 
+ 	if (ramdisk_execute_command) {
++		pr_emerg("KINIT_DBG: calling run_init_process(%s)\n", ramdisk_execute_command);
+ 		ret = run_init_process(ramdisk_execute_command);
+ 		if (!ret)
+ 			return 0;
+@@ -1510,16 +1561,24 @@
+ /* Open /dev/console, for stdin/stdout/stderr, this should never fail */
+ void __init console_on_rootfs(void)
+ {
+-	struct file *file = filp_open("/dev/console", O_RDWR, 0);
+-
++	struct file *file;
++	__sil_puts("\nSBI_C0: before filp_open /dev/console\n");
++	file = filp_open("/dev/console", O_RDWR, 0);
++	__sil_puts("\nSBI_C1: after filp_open\n");
+ 	if (IS_ERR(file)) {
++		__sil_puts("\nSBI_C1e: filp_open returned IS_ERR\n");
+ 		pr_err("Warning: unable to open an initial console.\n");
+ 		return;
+ 	}
++	__sil_puts("\nSBI_C2a: before init_dup #1\n");
+ 	init_dup(file);
++	__sil_puts("\nSBI_C2b: before init_dup #2\n");
+ 	init_dup(file);
++	__sil_puts("\nSBI_C2c: before init_dup #3\n");
+ 	init_dup(file);
++	__sil_puts("\nSBI_C3: after 3x init_dup, before fput\n");
+ 	fput(file);
++	__sil_puts("\nSBI_C4: after fput (end of console_on_rootfs)\n");
+ }
+ 
+ static noinline void __init kernel_init_freeable(void)
+@@ -1551,20 +1610,45 @@
+ 	padata_init();
+ 	page_alloc_init_late();
+ 
++	__sil_puts("\nSBI_F0: before do_basic_setup\n");
+ 	do_basic_setup();
++	__sil_puts("\nSBI_F1: after do_basic_setup\n");
+ 
+ 	kunit_run_all_tests();
++	__sil_puts("\nSBI_F2: after kunit_run_all_tests\n");
+ 
+ 	wait_for_initramfs();
++	__sil_puts("\nSBI_F3: after wait_for_initramfs\n");
+ 	console_on_rootfs();
++	__sil_puts("\nSBI_F4: after console_on_rootfs\n");
++	__sil_puts("\nSBI_F4b: adjacent probe (no gap)\n");
++	/* Disable IRQs across the gap to rule out an async IRQ that hangs the CPU. */
++	{
++		unsigned long __flags;
++		local_irq_save(__flags);
++		__sil_puts("\nSBI_F4c: IRQs OFF\n");
++		local_irq_restore(__flags);
++	}
++	__sil_puts("\nSBI_F4d: IRQs restored\n");
+ 
+ 	/*
+ 	 * check if there is an early userspace init.  If yes, let it do all
+ 	 * the work
+ 	 */
+-	if (init_eaccess(ramdisk_execute_command) != 0) {
+-		ramdisk_execute_command = NULL;
+-		prepare_namespace();
++	__sil_puts("\nSBI_F5: before init_eaccess\n");
++	{
++		int __iea;
++		__sil_puts("\nSBI_F5x: calling init_eaccess now\n");
++		__iea = init_eaccess(ramdisk_execute_command);
++		__sil_puts("\nSBI_F5y: init_eaccess returned\n");
++		if (__iea != 0) {
++			__sil_puts("\nSBI_F5a: init_eaccess FAILED, entering prepare_namespace\n");
++			ramdisk_execute_command = NULL;
++			prepare_namespace();
++			__sil_puts("\nSBI_F5b: after prepare_namespace\n");
++		} else {
++			__sil_puts("\nSBI_F5c: init_eaccess OK\n");
++		}
+ 	}
+ 
+ 	/*
+@@ -1576,5 +1660,7 @@
+ 	 * and default modules
+ 	 */
+ 
++	__sil_puts("\nSBI_F6: before integrity_load_keys\n");
+ 	integrity_load_keys();
++	__sil_puts("\nSBI_F7: after integrity_load_keys (end of kernel_init_freeable)\n");
+ }

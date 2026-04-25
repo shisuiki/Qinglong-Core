@@ -7,16 +7,15 @@
     model          = "RealDigital Urbana RV32IMA SoC";
 
     chosen {
-        bootargs       = "earlycon=uartlite,mmio32,0xc0000000 rdinit=/sbin/init loglevel=8 keep_bootcon debug nosoftlockup nmi_watchdog=0 initcall_debug ignore_loglevel clocksource=jiffies rodata=off init_on_free=off init_on_alloc=off";
+        bootargs       = "earlycon=uartlite,mmio32,0xc0000000 console=ttyUL0,115200 rdinit=/sbin/urbana_init loglevel=8 keep_bootcon debug nosoftlockup nmi_watchdog=0 initcall_debug ignore_loglevel clocksource=jiffies rodata=off init_on_free=off init_on_alloc=off";
         stdout-path    = "/soc/serial@c0000000";
-        /* rootfs.cpio is exactly 20610560 B = 0x013A7E00 at 0x43000000.
-         * initrd-end must match CPIO size EXACTLY: too big → unpack_to_rootfs
-         * reads uninitialized DDR past archive → "invalid magic at start of
-         * compressed archive" → no rootfs. Too small → archive truncated,
-         * /sbin/init missing silently → prepare_namespace → "Can't open
-         * blockdev" hang. Correct end = 0x43000000 + 0x013A7E00 = 0x443A7E00. */
+        /* rootfs.cpio size must match initrd-end EXACTLY (too big or too small
+         * breaks unpack_to_rootfs). Current cpio = 11880448 B = 0x00B54800 at
+         * 0x43000000. End = 0x43000000 + 0x00B54800 = 0x43B54800.
+         * If you rebuild rootfs.cpio, recompute with: printf "0x%x\n"
+         * $((0x43000000 + $(stat -c%s rootfs.cpio))) */
         linux,initrd-start = <0x43000000>;
-        linux,initrd-end   = <0x443A7E00>;
+        linux,initrd-end   = <0x43B54800>;
     };
 
     aliases {
